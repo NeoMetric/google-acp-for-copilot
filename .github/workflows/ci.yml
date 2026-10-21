@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Package
+        run: npm run package -- --out google-acp-for-copilot.vsix
+
+      - name: Smoke test in VS Code (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:smoke
+
+      - name: Smoke test in VS Code
+        if: runner.os != 'Linux'
+        run: npm run test:smoke
+
+      - name: Upload the package
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: google-acp-for-copilot.vsix

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<title>ACP: editor to agent to Gemini</title>
+<rect x="1" y="1" width="126" height="126" rx="27" fill="#F6F2EA" stroke="#D9D3C7" stroke-width="2"/>
+<g fill="none" stroke="#26241F" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M42 64 H49 M45 60 L49 64 L45 68"/><path d="M79 64 H86 M82 60 L86 64 L82 68"/></g>
+<rect x="11" y="50" width="28" height="28" rx="8" fill="#26241F"/>
+<path d="M23.6 59.1 L18.7 64 L23.6 68.9 M26.4 59.1 L31.3 64 L26.4 68.9" fill="none" stroke="#F6F2EA" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="64" cy="64" r="14" fill="#4FB3A5"/>
+<path d="M61.5 59.8 L66.8 64 L61.5 68.2" fill="none" stroke="#0F2F2B" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="103" cy="64" r="14" fill="#4F7DF3"/>
+<path d="M108.4 59.5 A7 7 0 1 0 110 64 H104" fill="none" stroke="#FFFFFF" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

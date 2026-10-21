@@ -1,0 +1,182 @@
+{
+  "name": "google-acp-for-copilot",
+  "displayName": "Google ACP for Copilot",
+  "description": "Use Google Antigravity and Gemini models inside GitHub Copilot Chat by running Google's Agent Client Protocol server locally.",
+  "version": "0.1.0",
+  "publisher": "NeoMetric",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NeoMetric/google-acp-for-copilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NeoMetric/google-acp-for-copilot/issues"
+  },
+  "homepage": "https://github.com/NeoMetric/google-acp-for-copilot#readme",
+  "galleryBanner": {
+    "color": "#1f1f1f",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "google",
+    "gemini",
+    "antigravity",
+    "acp",
+    "agent client protocol",
+    "copilot",
+    "language model"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Google ACP starts a local agent process in the workspace folder and lets it use the tools of your chats, so it stays off in Restricted Mode."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Google ACP needs a real folder on disk to root the agent in."
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguageModelChatProvider:google-acp"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "displayName": "Google Agent",
+        "vendor": "google-acp"
+      }
+    ],
+    "commands": [
+      {
+        "command": "googleAcp.setUp",
+        "title": "Set Up (Download Antigravity Server)",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.signIn",
+        "title": "Sign In (Google Account or API Key)",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.setApiKey",
+        "title": "Set Gemini API Key",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.chooseAuthPreference",
+        "title": "Choose Which Credentials to Use",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.removeApiKey",
+        "title": "Remove Gemini API Key",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.restart",
+        "title": "Restart Agent",
+        "category": "Google ACP"
+      },
+      {
+        "command": "googleAcp.showAccount",
+        "title": "Show Agent and Credentials",
+        "category": "Google ACP"
+      }
+    ],
+    "configuration": {
+      "title": "Google ACP",
+      "properties": {
+        "googleAcp.agent.command": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "order": 2,
+          "markdownDescription": "Program that starts the ACP server. Leave empty to use the Antigravity server (`agy_acp_server`) the extension downloads."
+        },
+        "googleAcp.agent.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "order": 3,
+          "markdownDescription": "Arguments for the program. Leave empty for the default (none)."
+        },
+        "googleAcp.permissionMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ask"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "order": 5,
+          "enumDescriptions": [
+            "Approve the permission requests of the agent automatically.",
+            "Show the options the agent offers and decline the request unless you pick one."
+          ],
+          "markdownDescription": "How the extension answers permission requests coming from the Google agent. Tools that run through Copilot Chat still go through Copilot's own confirmations either way."
+        },
+        "googleAcp.useAgentBuiltInTools": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Let the Google agent use its own file, shell and search tools. When off (default), the extension asks Antigravity not to use them and declines their permission requests, so the tools of your Copilot chat do the work. Antigravity may still run built-in tools that never ask for permission."
+        },
+        "googleAcp.authPreference": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "apiKey",
+            "oauth"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "order": 6,
+          "enumDescriptions": [
+            "Use the saved API key when there is one, otherwise the signed-in account.",
+            "Use the saved API key. Without one, the agent falls back to its signed-in account.",
+            "Always use the signed-in account and ignore the saved API key, GEMINI_API_KEY and GOOGLE_API_KEY."
+          ],
+          "markdownDescription": "Which credentials the agent uses when both a Gemini API key and a signed-in account are available. Changing it restarts the agent."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "npm run typecheck && node esbuild.js",
+    "typecheck": "tsc -p . --noEmit",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:smoke": "npm run compile && node esbuild.js --tests && vscode-test",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.105.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
+    "mocha": "^12.0.3",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.5"
+  }
+}
