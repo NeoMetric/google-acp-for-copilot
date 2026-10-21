@@ -55,6 +55,10 @@ Copilot Chat calls the extension's language model provider. The extension starts
 - **No usage meter.** The Claude version shows plan limits in the status bar; the Google servers do not report plan usage over ACP.
 - **No integrity check on the download.** The ACP registry publishes no checksums, so the extension pins the version and URL, requires HTTPS, and checks the download size.
 
+## Privacy
+
+The extension collects no telemetry. Your prompts go only to the Google ACP server it launches on your machine, which talks to Google under your own account. On first use the extension downloads that server from `https://dl.google.com/agy-extensions/releases`; nothing else is fetched. The local MCP bridge listens on `127.0.0.1` only and requires a per-session token.
+
 ## Development
 
 ```
