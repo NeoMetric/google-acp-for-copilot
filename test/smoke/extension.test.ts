@@ -23,7 +23,7 @@ suite('Google ACP smoke test', () => {
 
 	test('registers every contributed command', async () => {
 		const commands = await vscode.commands.getCommands(true);
-		for (const command of ['googleAcp.setUp', 'googleAcp.signIn', 'googleAcp.setApiKey', 'googleAcp.removeApiKey', 'googleAcp.restart', 'googleAcp.showAccount', 'googleAcp.refreshUsage']) {
+		for (const command of ['googleAcp.setUp', 'googleAcp.signIn', 'googleAcp.setApiKey', 'googleAcp.chooseAuthPreference', 'googleAcp.removeApiKey', 'googleAcp.restart', 'googleAcp.showAccount']) {
 			assert.ok(commands.includes(command), `${command} is not registered`);
 		}
 	});
@@ -31,7 +31,8 @@ suite('Google ACP smoke test', () => {
 	test('contributes the settings with their defaults', () => {
 		const configuration = vscode.workspace.getConfiguration('googleAcp');
 		assert.strictEqual(configuration.get('permissionMode'), 'auto');
-		assert.strictEqual(configuration.get('usage.showInStatusBar'), true);
+		assert.strictEqual(configuration.get('authPreference'), 'auto');
+		assert.strictEqual(configuration.get('useAgentBuiltInTools'), false);
 	});
 
 	test('offers no models, and downloads nothing, before the user sets the agent up', async function () {
@@ -43,6 +44,5 @@ suite('Google ACP smoke test', () => {
 
 	test('answers the commands that need no agent', async () => {
 		await vscode.commands.executeCommand('googleAcp.showAccount');
-		await vscode.commands.executeCommand('googleAcp.refreshUsage');
 	});
 });
