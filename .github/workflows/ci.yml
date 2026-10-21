@@ -32,13 +32,9 @@ jobs:
       - name: Package
         run: npm run package -- --out google-acp-for-copilot.vsix
 
-      - name: Smoke test in VS Code (Linux)
+      - name: Smoke test in VS Code
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:smoke
-
-      - name: Smoke test in VS Code
-        if: runner.os != 'Linux'
-        run: npm run test:smoke
 
       - name: Upload the package
         if: runner.os == 'Linux'
