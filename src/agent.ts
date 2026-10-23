@@ -36,7 +36,7 @@ const NATIVE_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', '
  */
 const DISABLED_BUILTIN_TOOLS = ['run_command', 'view_file', 'create_file', 'edit_file', 'list_directory', 'search_directory', 'find_file', 'search_web', 'read_url_content', 'generate_image', 'start_subagent'];
 /** Appended to the agent's system prompt (the server advertises `systemPrompt.append`) so it prefers the tools of the chat. */
-const TOOLS_INSTRUCTION = "Use only the tools of the MCP server named \"vscode\" for reading and changing files, running commands and searching. Do not use your own built-in file, shell, search or web tools.";
+const TOOLS_INSTRUCTION = "Use only the tools of the MCP server named \"vscode\" for reading and changing files, running commands and searching. Do not use your own built-in file, shell, search or web tools. Before you call one of those tools for the first time, read its schema file, then pass every argument the schema lists as required.";
 
 /** Time limits for the short requests; `session/prompt` has none, as a turn can run for long. */
 const INITIALIZE_TIMEOUT_MS = 120_000;
@@ -842,6 +842,9 @@ export class AgentClient implements vscode.Disposable {
 			// Tool titles and plan entries can quote commands and file names, so they are debug-level.
 			if (update.sessionUpdate === 'tool_call') {
 				this.log(`tool_call ${update.toolCallId ?? ''}: ${update.title ?? ''}`.trim(), 'debug');
+				this.log(`tool_call raw: ${JSON.stringify(update)}`, 'debug');
+			} else if (update.sessionUpdate === 'tool_call_update') {
+				this.log(`tool_call_update raw: ${JSON.stringify(update)}`, 'debug');
 			} else if (update.sessionUpdate === 'plan') {
 				this.log(`plan: ${update.entries?.map(entry => `${entry.status}:${entry.content}`).join(' | ') ?? ''}`, 'debug');
 			} else if (update.sessionUpdate === 'usage_update') {

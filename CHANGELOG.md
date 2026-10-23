@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2026-10-23
+
+- The instruction appended to the agent's system prompt now also asks it to read a tool's schema file before first use and to pass every argument the schema lists as required. The agent reaches the chat's tools through a generic MCP wrapper and otherwise skips arguments such as a terminal command's `description`.
+- At debug level, the bridge logs the arguments of each `tools/call` and the agent's raw `tool_call` and `tool_call_update` messages, to diagnose what the agent sends for a tool.
+
 ## 0.1.1 - 2026-10-23
 
 - A tool call the agent makes while Copilot is still running another no longer fails with "no chat request is waiting for it": it is held and sent with the next response.

@@ -291,6 +291,9 @@ export class McpBridge implements vscode.Disposable {
 			return { content: [{ type: 'text', text: `Tool ${name} is not available in this session.` }], isError: true };
 		}
 
+		// Arguments can quote commands and file contents, so they are debug-level.
+		this.log(`tools/call ${name} arguments: ${stringify(request.arguments ?? {})}`, 'debug');
+
 		const cancellation = new vscode.CancellationTokenSource();
 		const onClose = () => {
 			if (!response.writableFinished) {
