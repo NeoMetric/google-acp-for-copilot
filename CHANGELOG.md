@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 - 2026-10-24
+
+- Discovers Copilot skills (`SKILL.md`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) from `.copilot/`, `.claude/`, `.agents/`, and `.github/` directories as well as configured skill/prompt locations, and includes them in the agent's system prompt.
+- Strips redundant Copilot environment and memory wrappers from incoming chat requests so the agent receives clean user prompts, attachments, and editor context.
+- Limits transcript block history to 40,000 characters and omits preamble messages before the first user prompt.
+- Tracks session token usage and prompt cache statistics on turn completion in the provider.
+
 ## 0.1.2 - 2026-10-23
 
 - The instruction appended to the agent's system prompt now also asks it to read a tool's schema file before first use and to pass every argument the schema lists as required. The agent reaches the chat's tools through a generic MCP wrapper and otherwise skips arguments such as a terminal command's `description`.
