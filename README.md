@@ -56,6 +56,10 @@ Copilot Chat calls the extension's language model provider. The extension starts
 
 A tool call ends the response so Copilot can run the tool, and the next request carrying its result continues the same turn. A call the agent makes while Copilot is still running another is held for that next response rather than failed, and stopping the chat cancels the agent's turn even after a tool call was handed over.
 
+## Skills and customizations
+
+Skills (folders with a `SKILL.md` in `.copilot/skills`, `.claude/skills`, `.agents/skills`, `.github/skills`, or directories configured in `chat.agentSkillsLocations`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) are automatically discovered and included in the session's system prompt so Google Antigravity can use them.
+
 ## What is not included
 
 - **No usage meter.** The Claude version shows plan limits in the status bar; the Google servers do not report plan usage over ACP.

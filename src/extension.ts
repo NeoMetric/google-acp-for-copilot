@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentClient } from './agent';
 import { ApiKeyStore } from './auth';
@@ -11,6 +12,7 @@ import { GoogleAcpProvider, VENDOR } from './provider';
 import { scopedLog } from './logging';
 import { killAllChildren } from './processes';
 import { formatReset, type QuotaLimit } from './quota';
+import { createSessionPrompt } from './systemPrompt';
 
 /** Set once the first-run explanation of a missing ACP server was shown, so it is never repeated. */
 const SETUP_OFFERED_KEY = 'googleAcp.setupOffered';
@@ -24,7 +26,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const bridge = new McpBridge(scopedLog(output, 'bridge'));
 	const apiKeys = new ApiKeyStore(context.secrets);
 	const agent = new AgentClient(context, output, apiKeys);
-	const provider = new GoogleAcpProvider(agent, bridge, output, context.globalState);
+	const provider = new GoogleAcpProvider(agent, bridge, output, context.globalState, createSessionPrompt(scopedLog(output, 'prompt'), path.join(path.dirname(path.dirname(context.globalStorageUri.fsPath)), 'prompts')));
 
 	const reportFailure = (what: string, error: unknown) => {
 		const reason = error instanceof Error ? error.message : String(error);

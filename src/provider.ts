@@ -87,6 +87,26 @@ interface ChatSession {
 	model: string;
 	effort?: string;
 	turn?: ActiveTurn;
+	cachedReadTokens: number;
+	cachedWriteTokens: number;
+	inputTokens: number;
+	outputTokens: number;
+}
+
+/**
+ * Token metrics for an active chat session. The cache fields are only present
+ * when the agent reports per-turn usage; the context fields come from its
+ * `usage_update` notifications.
+ */
+export interface SessionCacheStats {
+	readonly hitRate?: number;
+	readonly cachedTokens?: number;
+	readonly uncachedTokens?: number;
+	readonly totalPromptTokens?: number;
+	readonly outputTokens?: number;
+	readonly contextUsed?: number;
+	readonly contextSize?: number;
+	readonly model: string;
 }
 
 const MODELS_KEY = 'googleAcp.models';
@@ -107,6 +127,10 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	/** Fires after a chat turn ended successfully, which spends plan limits. */
 	readonly onDidFinishTurn = this.turnEmitter.event;
 
+	private readonly cacheStatsEmitter = new vscode.EventEmitter<SessionCacheStats>();
+	/** Fires when cache hit statistics for the current chat session are updated. */
+	readonly onDidChangeCacheStats = this.cacheStatsEmitter.event;
+
 	private readonly sessions = new Map<string, ChatSession>();
 	private readonly agentListener: vscode.Disposable;
 	private readonly write: Log;
@@ -125,6 +149,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		private readonly bridge: McpBridge,
 		private readonly output: vscode.LogOutputChannel,
 		private readonly state?: vscode.Memento,
+		/** Returns the text to append to the agent's system prompt for a chat that offers these tools. */
+		private readonly sessionPrompt?: (tools: readonly vscode.LanguageModelChatTool[]) => Promise<string | undefined>,
 	) {
 		this.write = scopedLog(output, 'provider');
 		this.agentListener = this.agent.onDidChange(change => this.handleAgentChange(change));
@@ -299,6 +325,10 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			restoreContext = true;
 		}
 
+		if (restoreContext) {
+			this.log(`Roles of the first messages being restored: ${messages.slice(0, 3).map(message => message.role).join(', ')}`, 'debug');
+		}
+
 		let blocks = toAcpContentBlocks(messages.slice(startIndex));
 		if (blocks.length === 0) {
 			blocks = toAcpContentBlocks(messages.slice(lastUser));
@@ -378,6 +408,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.agentListener.dispose();
 		this.changeEmitter.dispose();
 		this.turnEmitter.dispose();
+		this.cacheStatsEmitter.dispose();
 		for (const key of [...this.sessions.keys()]) {
 			void this.destroySession(key);
 		}
@@ -403,6 +434,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[]): Promise<ChatSession> {
 		const endpoint = await this.bridge.registerSession(tools, (name, input, token) => this.executeTool(key, name, input, token));
 		try {
+			const systemPromptAppend = await this.buildSessionPrompt(tools);
 			const acp = await this.agent.createSession({
 				cwd: workspaceCwd(),
 				mcpServers: [{
@@ -412,9 +444,19 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 					headers: [{ name: 'Authorization', value: `Bearer ${endpoint.token}` }],
 				}],
 				model: acpModelValue(model.id),
+				systemPromptAppend,
 			});
 
-			const session: ChatSession = { acp, endpoint, history: [], model: model.id };
+			const session: ChatSession = {
+				acp,
+				endpoint,
+				history: [],
+				model: model.id,
+				cachedReadTokens: 0,
+				cachedWriteTokens: 0,
+				inputTokens: 0,
+				outputTokens: 0,
+			};
 			this.sessions.set(key, session);
 			this.log(`Created chat session for ${key} using ${model.id}`);
 			this.evictIdleSessions(key);
@@ -422,6 +464,16 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		} catch (error) {
 			this.bridge.unregisterSession(endpoint.token);
 			throw error;
+		}
+	}
+
+	/** A chat still starts when the skills or instruction files cannot be read; it just has no extras. */
+	private async buildSessionPrompt(tools: readonly vscode.LanguageModelChatTool[]): Promise<string | undefined> {
+		try {
+			return await this.sessionPrompt?.(tools);
+		} catch (error) {
+			this.log(`Could not build the session prompt: ${describe(error)}`, 'warn');
+			return undefined;
 		}
 	}
 
@@ -587,6 +639,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		session.history.push(...fingerprints);
 
 		this.reportUsage(turn);
+		this.recordSessionUsage(session, turn);
 		this.turnEmitter.fire();
 
 		const stopReason = turn.result?.stopReason ?? 'unknown';
@@ -635,7 +688,38 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			completion_tokens_details: { reasoning_tokens: usage?.reasoningOutputTokens ?? 0 },
 		};
 		turn.progress.report(vscode.LanguageModelDataPart.json(payload, 'usage'));
-		this.log(`Reported usage: ${promptTokens} prompt token(s), ${completionTokens} completion token(s)`);
+		const context = turn.contextUsed !== undefined ? ` (agent context ${turn.contextUsed}/${turn.contextSize ?? '?'})` : '';
+		this.log(`Reported usage: ${promptTokens} prompt token(s), ${completionTokens} completion token(s)${context}`);
+	}
+
+	private recordSessionUsage(session: ChatSession, turn: ActiveTurn): void {
+		const usage = turn.result?.usage;
+		if (!usage) {
+			if (turn.contextUsed !== undefined) {
+				this.cacheStatsEmitter.fire({ contextUsed: turn.contextUsed, contextSize: turn.contextSize, model: session.model });
+			}
+			return;
+		}
+
+		session.cachedReadTokens += usage.cachedReadTokens;
+		session.cachedWriteTokens += usage.cachedWriteTokens;
+		session.inputTokens += usage.inputTokens;
+		session.outputTokens += usage.outputTokens;
+
+		const totalPrompt = session.cachedReadTokens + session.cachedWriteTokens + session.inputTokens;
+		const hitRate = totalPrompt > 0 ? (session.cachedReadTokens / totalPrompt) * 100 : 0;
+
+		const stats: SessionCacheStats = {
+			hitRate,
+			cachedTokens: session.cachedReadTokens,
+			uncachedTokens: session.inputTokens,
+			totalPromptTokens: totalPrompt,
+			outputTokens: session.outputTokens,
+			model: session.model,
+		};
+
+		this.log(`Session cache stats: ${hitRate.toFixed(1)}% hit rate (${session.cachedReadTokens.toLocaleString()} cached / ${totalPrompt.toLocaleString()} prompt tokens)`);
+		this.cacheStatsEmitter.fire(stats);
 	}
 
 	/**

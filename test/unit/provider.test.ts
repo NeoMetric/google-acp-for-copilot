@@ -212,4 +212,36 @@ describe('GoogleAcpProvider tool calls', () => {
 		expect(late.result.isError).toBe(true);
 		expect(late.result.content[0].text).toContain('cannot run right now');
 	});
+
+	it('emits cache stats on turn completion when token usage is available', async () => {
+		const statsList: any[] = [];
+		provider.onDidChangeCacheStats(stats => statsList.push(stats));
+
+		// Mock prompt to return token usage
+		(agent as any).prompt = async (_sessionId: string) => {
+			return {
+				stopReason: 'end_turn',
+				usage: {
+					inputTokens: 100,
+					outputTokens: 50,
+					cachedReadTokens: 400,
+					cachedWriteTokens: 0,
+					totalTokens: 550,
+				},
+			};
+		};
+
+		const first = request([user('system'), user('hello')], new CancellationTokenSource().token);
+		await first.response;
+
+		expect(statsList.length).toBe(1);
+		expect(statsList[0]).toEqual({
+			hitRate: 80, // 400 / (400 + 100) * 100%
+			cachedTokens: 400,
+			uncachedTokens: 100,
+			totalPromptTokens: 500,
+			outputTokens: 50,
+			model: 'gemini-test',
+		});
+	});
 });
