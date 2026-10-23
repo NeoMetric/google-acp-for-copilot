@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-23
 
 - A tool call the agent makes while Copilot is still running another no longer fails with "no chat request is waiting for it": it is held and sent with the next response.
 - Stopping a chat now cancels the agent's turn even after a tool call was handed to Copilot, and a tool call Copilot never picks up is failed before the agent's own three-minute MCP timeout instead of stalling the step.
