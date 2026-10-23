@@ -34,7 +34,7 @@ export function toAcpContentBlocks(messages: readonly vscode.LanguageModelChatRe
 			continue;
 		}
 
-		const text = textOf(message);
+		const text = promptTextOf(message);
 		if (text.trim().length > 0) {
 			blocks.push({ type: 'text', text });
 		}
@@ -42,6 +42,31 @@ export function toAcpContentBlocks(messages: readonly vscode.LanguageModelChatRe
 	}
 
 	return blocks;
+}
+
+const USER_REQUEST = /<userRequest>([\s\S]*?)<\/userRequest>/;
+const ATTACHMENTS = /<attachments>[\s\S]*?<\/attachments>/;
+/** The file and selection the user has open, which changes with every request. */
+const EDITOR_CONTEXT = /<editorContext>[\s\S]*?<\/editorContext>/;
+/** Context Copilot adds on its own; none of it was said by the user. */
+const COPILOT_CONTEXT = /<(environment_info|workspace_info|userMemory|sessionMemory|repoMemory|reminderInstructions|editorContext|context)>[\s\S]*?<\/\1>/g;
+
+/**
+ * What the user actually said. Copilot wraps each request in its own context
+ * (environment, workspace layout, editor state, reminders, memory); the agent
+ * has its own, so only the request and the attachments the user added are kept.
+ * A message that carries that context without a request, as Copilot sends it
+ * ahead of the first one, comes out empty.
+ */
+export function promptTextOf(message: vscode.LanguageModelChatRequestMessage): string {
+	const text = textOf(message);
+	const request = USER_REQUEST.exec(text);
+	if (!request) {
+		const withoutContext = text.replace(COPILOT_CONTEXT, '');
+		return withoutContext === text ? text : withoutContext.trim();
+	}
+	const kept = [EDITOR_CONTEXT.exec(text)?.[0], ATTACHMENTS.exec(text)?.[0], request[1].trim()];
+	return kept.filter(part => part).join('\n\n');
 }
 
 /** The image blocks of a message, in the order the images were attached. */
@@ -143,7 +168,7 @@ export function lastUserMessageIndex(messages: readonly vscode.LanguageModelChat
 }
 
 /** Upper bound for the restored conversation, so a long chat cannot swamp the new turn. */
-export const TRANSCRIPT_MAX_CHARACTERS = 100_000;
+export const TRANSCRIPT_MAX_CHARACTERS = 40_000;
 
 /**
  * Renders earlier messages as one text block, for an ACP session that did not
@@ -153,10 +178,16 @@ export const TRANSCRIPT_MAX_CHARACTERS = 100_000;
 export function toTranscriptBlock(messages: readonly vscode.LanguageModelChatRequestMessage[], maxCharacters = TRANSCRIPT_MAX_CHARACTERS): AcpTextBlock | undefined {
 	const entries: string[] = [];
 
-	for (const message of messages) {
+	// Copilot's system prompt comes ahead of the first user message, and the role
+	// it carries is not reliably `Assistant`, so everything before that message is
+	// left out: the agent has a system prompt of its own and must not receive it.
+	const firstUser = messages.findIndex(message => message.role === vscode.LanguageModelChatMessageRole.User);
+	const history = firstUser < 0 ? [] : messages.slice(firstUser);
+
+	for (const message of history) {
 		const lines: string[] = [];
 
-		const text = textOf(message).trim();
+		const text = promptTextOf(message).trim();
 		if (text.length > 0) {
 			lines.push(text);
 		}

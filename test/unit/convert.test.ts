@@ -4,12 +4,24 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it } from 'vitest';
-import { diverged, fingerprint, imageFingerprint, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock } from '../../src/convert';
+import { diverged, fingerprint, imageFingerprint, lastUserMessageIndex, promptTextOf, textOf, toAcpContentBlocks, toTranscriptBlock } from '../../src/convert';
 import { assistant, image, toolCall, toolResult, user } from './messages';
 
 describe('textOf', () => {
 	it('joins text parts and ignores the rest', () => {
 		expect(textOf(user('one', image([1]), 'two'))).toBe('one\ntwo');
+	});
+});
+
+describe('promptTextOf', () => {
+	it('extracts request, editor context and attachments when wrapped in Copilot tags', () => {
+		const raw = '<environment_info>env</environment_info>\n<editorContext>file.ts</editorContext>\n<attachments>att</attachments>\n<userRequest>do work</userRequest>';
+		expect(promptTextOf(user(raw))).toBe('<editorContext>file.ts</editorContext>\n\n<attachments>att</attachments>\n\ndo work');
+	});
+
+	it('strips Copilot context when userRequest tag is absent', () => {
+		const raw = '<userMemory>mem</userMemory>\nclean text';
+		expect(promptTextOf(user(raw))).toBe('clean text');
 	});
 });
 
