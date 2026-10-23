@@ -35,8 +35,11 @@ const NATIVE_TOOL_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', '
  * `ask_question` stay, as the agent needs them to end a turn and to ask the user.
  */
 const DISABLED_BUILTIN_TOOLS = ['run_command', 'view_file', 'create_file', 'edit_file', 'list_directory', 'search_directory', 'find_file', 'search_web', 'read_url_content', 'generate_image', 'start_subagent'];
-/** Appended to the agent's system prompt (the server advertises `systemPrompt.append`) so it prefers the tools of the chat. */
-const TOOLS_INSTRUCTION = "Use only the tools of the MCP server named \"vscode\" for reading and changing files, running commands and searching. Do not use your own built-in file, shell, search or web tools. Before you call one of those tools for the first time, read its schema file, then pass every argument the schema lists as required.";
+// TEMPORARILY DISABLED to check how the agent behaves without this extra system prompt text. The built-in tools are
+// already disabled through `disabledTools`, so the first sentences are redundant; the "read the schema first" sentence
+// came from commit 9f9daac (model omitted required arguments), so watch for that problem coming back.
+// /** Appended to the agent's system prompt (the server advertises `systemPrompt.append`) so it prefers the tools of the chat. */
+// const TOOLS_INSTRUCTION = "Use only the tools of the MCP server named \"vscode\" for reading and changing files, running commands and searching. Do not use your own built-in file, shell, search or web tools. Before you call one of those tools for the first time, read its schema file, then pass every argument the schema lists as required.";
 
 /** Time limits for the short requests; `session/prompt` has none, as a turn can run for long. */
 const INITIALIZE_TIMEOUT_MS = 120_000;
@@ -110,6 +113,8 @@ export interface CreateSessionOptions {
 	readonly cwd: string;
 	readonly mcpServers: readonly AcpMcpHttpServer[];
 	readonly model?: string;
+	/** Text added to the end of the agent's own system prompt, which stays in place. */
+	readonly systemPromptAppend?: string;
 }
 
 export interface PromptHandlers {
@@ -380,16 +385,23 @@ export class AgentClient implements vscode.Disposable {
 
 		const base = { cwd: options.cwd, mcpServers: options.mcpServers };
 		const withoutOwnTools = !this.useBuiltInTools;
+		// TOOLS_INSTRUCTION is temporarily disabled (see the note at its definition).
+		const append = [/* withoutOwnTools ? TOOLS_INSTRUCTION : undefined, */ options.systemPromptAppend].filter(part => part).join('\n\n');
+		const antigravity = {
+			...(withoutOwnTools ? { disabledTools: DISABLED_BUILTIN_TOOLS } : {}),
+			...(append ? { systemPrompt: { append } } : {}),
+		};
+		const withMeta = Object.keys(antigravity).length > 0;
 
 		try {
 			let response: AcpNewSessionResponse;
 			try {
-				response = await rpc.request<AcpNewSessionResponse>('session/new', withoutOwnTools
-					? { ...base, _meta: { antigravity: { disabledTools: DISABLED_BUILTIN_TOOLS, systemPrompt: { append: TOOLS_INSTRUCTION } } } }
+				response = await rpc.request<AcpNewSessionResponse>('session/new', withMeta
+					? { ...base, _meta: { antigravity } }
 					: base, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
 			} catch (error) {
 				// A server that rejects the extra `_meta` must not lose the session over it.
-				if (!withoutOwnTools || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
+				if (!withMeta || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
 					throw error;
 				}
 				this.log(`The server refused the session options (${describeError(error)}); creating the session without them.`, 'warn');
@@ -468,8 +480,13 @@ export class AgentClient implements vscode.Disposable {
 		try {
 			const response = await rpc.request<AcpPromptResponse>('session/prompt', { sessionId, prompt: blocks });
 			this.logMeta('prompt response', response._meta);
+			const usage = readTokenUsage(response);
+			if (!usage) {
+				// Shown at info level: without a per-turn breakdown there are no cache statistics.
+				this.log(`The prompt response carried no token usage; fields: ${JSON.stringify(response).slice(0, 1500)}`);
+			}
 			this.setLimit(undefined);
-			return { stopReason: response.stopReason ?? 'end_turn', usage: readTokenUsage(response) };
+			return { stopReason: response.stopReason ?? 'end_turn', usage };
 		} catch (error) {
 			this.captureAuthState(error);
 			const limit = parseQuotaError(error);
@@ -983,7 +1000,8 @@ export function readTokenUsage(response: AcpPromptResponse): AcpTokenUsage | und
 	const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 	const inputTokens = count(usage.inputTokens);
 	const outputTokens = count(usage.outputTokens);
-	const cachedReadTokens = count(usage.cachedReadTokens);
+	// The quota breakdown names cache reads `cachedInputTokens`; `usage` uses `cachedReadTokens`.
+	const cachedReadTokens = count((usage as { cachedInputTokens?: number }).cachedInputTokens ?? usage.cachedReadTokens);
 	const cachedWriteTokens = count(usage.cachedWriteTokens);
 
 	return {

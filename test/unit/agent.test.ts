@@ -17,6 +17,8 @@ import { configValues } from './vscode-mock';
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const API_KEY_SECRET = 'googleAcp.geminiApiKey';
+/** Stopping the agent runs `taskkill` on Windows, which can take a couple of seconds. */
+const SLOW_KILL_TIMEOUT_MS = 30_000;
 
 let temp: string;
 let agent: AgentClient | undefined;
@@ -186,7 +188,7 @@ describe('AgentClient', () => {
 		delete process.env.FAKE_ACP_MODE;
 		await client.restart();
 		await expect(client.ensureStarted()).resolves.toBeDefined();
-	});
+	}, SLOW_KILL_TIMEOUT_MS);
 
 	it('starts without an API key by default', async () => {
 		const client = createAgent();
@@ -233,11 +235,11 @@ describe('AgentClient', () => {
 		await client.ensureStarted();
 
 		secrets.storeFromElsewhere(API_KEY_SECRET, 'AIza-other-window');
-		await vi.waitFor(() => expect(changes).toEqual(['restarted']));
+		await vi.waitFor(() => expect(changes).toEqual(['restarted']), { timeout: SLOW_KILL_TIMEOUT_MS });
 
 		expect(await reportedKey(client)).toBe('env:AIza-other-window');
 		expect(changes).toEqual(['restarted']);
-	});
+	}, SLOW_KILL_TIMEOUT_MS);
 
 	it('does nothing when the dialog for a new key is dismissed', async () => {
 		const client = createAgent();
