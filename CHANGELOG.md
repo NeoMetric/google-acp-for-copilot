@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- A tool call the agent makes while Copilot is still running another no longer fails with "no chat request is waiting for it": it is held and sent with the next response.
+- Stopping a chat now cancels the agent's turn even after a tool call was handed to Copilot, and a tool call Copilot never picks up is failed before the agent's own three-minute MCP timeout instead of stalling the step.
+- Tool calls are handed to Copilot as soon as the agent stops issuing them (40 ms of quiet, up to 250 ms) instead of always waiting the full 250 ms, which took that wait off every tool call.
+- The agent's harness output is logged at the level the harness itself reports, so forwarded `I`/`W` lines no longer show up as errors.
+
 ## 0.1.0
 
 - First release, derived from Claude ACP for Copilot.

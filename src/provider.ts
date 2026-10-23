@@ -23,15 +23,27 @@ const TOOL_CALL_ID_PREFIX = `google-acp-${randomBytes(4).toString('hex')}-`;
 const MAX_CHAT_SESSIONS = 8;
 
 /**
- * How long to collect tool calls before handing a turn back to Copilot, so
+ * The longest to collect tool calls before handing a turn back to Copilot, so
  * calls the agent issued in parallel travel in the same response.
  */
 const PARALLEL_TOOL_WINDOW_MS = 250;
+/** How long the tool calls have to stop arriving before a batch is handed over. */
+const PARALLEL_TOOL_QUIET_MS = 40;
 /** How long to wait for an abandoned turn to end before moving on. */
 const ABANDONED_TURN_WAIT_MS = 5_000;
+/**
+ * How long a tool call may wait for a response to carry it. The agent gives up
+ * on a call after three minutes, so failing just before that turns its hard
+ * timeout into a clean error, which costs the agent less than an unclear failure.
+ */
+const TOOL_WAIT_TIMEOUT_MS = 170_000;
 
 /** One tool call handed to Copilot, settled when its result comes back. */
 interface PendingToolCall {
+	readonly name: string;
+	readonly input: unknown;
+	/** Whether a response already carried the call to Copilot. */
+	reported: boolean;
 	readonly resolve: (content: ReadonlyArray<unknown>, isError: boolean) => void;
 	readonly reject: (error: Error) => void;
 }
@@ -44,12 +56,19 @@ interface PendingToolCall {
 interface ActiveTurn {
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>;
 	prompt: Promise<PromptResult>;
+	readonly sessionId: string;
 	result?: PromptResult;
 	error?: unknown;
 	finished: boolean;
 	/** False once the current response returned; late output has nowhere to go. */
 	streaming: boolean;
 	readonly pending: Map<string, PendingToolCall>;
+	/** Cancellations of every request that carried the turn, disposed with it. */
+	readonly cancellations: vscode.Disposable[];
+	/** When the newest tool call arrived, to spot the end of a batch. */
+	lastToolCallAt: number;
+	/** Fails the tool calls no response picked up before the agent gives up on them. */
+	toolDeadline?: NodeJS.Timeout;
 	waiters: Array<() => void>;
 	toolCalls: number;
 	characters: number;
@@ -254,6 +273,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		// Copilot ran the tools of the pending turn: hand the results back to the
 		// agent and keep streaming the same turn into this response.
 		if (session.turn && this.resolveToolResults(session.turn, messages)) {
+			this.trackCancellation(session.turn, token);
 			await this.driveTurn(key, session, progress, token, fingerprints);
 			return;
 		}
@@ -296,6 +316,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 
 		session.turn = this.startTurn(session, progress, token, blocks);
+		this.trackCancellation(session.turn, token);
 		await this.driveTurn(key, session, progress, token, fingerprints);
 	}
 
@@ -486,9 +507,12 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		turn = {
 			progress,
 			prompt,
+			sessionId: session.acp.sessionId,
 			finished: false,
 			streaming: true,
 			pending: new Map<string, PendingToolCall>(),
+			cancellations: [],
+			lastToolCallAt: Date.now(),
 			waiters: [],
 			toolCalls: 0,
 			characters: 0,
@@ -510,31 +534,36 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 		turn.progress = progress;
 		turn.streaming = true;
-
-		const cancellation = token.onCancellationRequested(() => {
-			this.log(`Cancelling the turn for ${key}`);
-			this.failPendingToolCalls(turn, new Error("The request was cancelled."));
-			this.agent.cancel(session.acp.sessionId);
-		});
+		this.clearToolDeadline(turn);
 
 		try {
 			while (!turn.finished) {
+				// A call the agent made while no response was open waits here for one.
+				this.reportHeldToolCalls(turn);
 				if (turn.pending.size > 0) {
 					// Give the agent a moment to issue parallel calls so all of them can
 					// travel in this response.
-					await delay(PARALLEL_TOOL_WINDOW_MS);
+					await this.waitForToolCalls(turn);
+					this.reportHeldToolCalls(turn);
 					this.reportUsage(turn);
 					turn.streaming = false;
+					this.watchToolCalls(key, session, turn);
 					this.log(`Turn for ${key} asked for ${turn.pending.size} tool call(s); returning them to Copilot.`);
 					return;
 				}
 				await Promise.race([this.sleepUntilActivity(turn), turn.prompt.then(() => undefined, () => undefined)]);
 			}
 		} finally {
-			cancellation.dispose();
+			// A response that ended without handing over a tool call leaves the turn
+			// without a stream; calls that arrive then wait for the next request.
+			if (!turn.finished) {
+				turn.streaming = false;
+			}
 		}
 
 		session.turn = undefined;
+		this.clearToolDeadline(turn);
+		this.disposeCancellations(turn);
 		this.failPendingToolCalls(turn, new Error("The turn ended before the tool result arrived."));
 
 		if (turn.error) {
@@ -612,13 +641,16 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	/**
 	 * Hands a tool call the agent made to the caller of the current request.
 	 *
-	 * Resolves with `undefined` when no response is open that could carry the
-	 * call, so the bridge runs the tool itself.
+	 * A call that arrives while no response is open is held until the next one
+	 * rather than failed: Copilot only runs the calls of a response it received.
+	 *
+	 * Resolves with `undefined` when the turn is over, so the bridge reports an
+	 * error to the agent instead of running the tool itself.
 	 */
 	private executeTool(key: string, name: string, input: unknown, token: vscode.CancellationToken): Promise<McpToolResult | undefined> {
 		const turn = this.sessions.get(key)?.turn;
-		if (!turn || turn.finished || !turn.streaming) {
-			this.log(`Tool ${name} was requested without a live response; running it in the extension.`, 'warn');
+		if (!turn || turn.finished) {
+			this.log(`Tool ${name} was requested after its turn ended; running it in the extension.`, 'warn');
 			return Promise.resolve(undefined);
 		}
 
@@ -629,6 +661,9 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 				reject(new Error("The tool call was cancelled."));
 			});
 			turn.pending.set(callId, {
+				name,
+				input,
+				reported: turn.streaming,
 				resolve: (content, isError) => {
 					cancellation.dispose();
 					resolve({ content, isError });
@@ -638,9 +673,86 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 					reject(error);
 				},
 			});
-			turn.progress.report(new vscode.LanguageModelToolCallPart(callId, name, (input ?? {}) as object));
-			this.wakeTurn(turn);
+			turn.lastToolCallAt = Date.now();
+
+			if (turn.streaming) {
+				turn.progress.report(new vscode.LanguageModelToolCallPart(callId, name, (input ?? {}) as object));
+				this.wakeTurn(turn);
+			} else {
+				this.log(`Tool ${name} arrived after the response returned; holding it for the next one.`);
+			}
 		});
+	}
+
+	/** Hands the calls that waited for a response to the one that just opened. */
+	private reportHeldToolCalls(turn: ActiveTurn): void {
+		for (const [callId, call] of turn.pending) {
+			if (call.reported) {
+				continue;
+			}
+			call.reported = true;
+			turn.progress.report(new vscode.LanguageModelToolCallPart(callId, call.name, (call.input ?? {}) as object));
+			this.log(`Handed the held tool call ${call.name} to Copilot.`);
+		}
+	}
+
+	/** Waits until the agent stops adding calls to the batch, up to the window. */
+	private async waitForToolCalls(turn: ActiveTurn): Promise<void> {
+		const deadline = Date.now() + PARALLEL_TOOL_WINDOW_MS;
+		for (; ;) {
+			const quiet = PARALLEL_TOOL_QUIET_MS - (Date.now() - turn.lastToolCallAt);
+			const left = Math.min(quiet, deadline - Date.now());
+			if (left <= 0) {
+				return;
+			}
+			await delay(left);
+		}
+	}
+
+	/**
+	 * Copilot can stop waiting for a tool call it was handed, for example when its
+	 * chat is closed, and nothing else would ever settle the call. Failing it here
+	 * beats the agent's own three-minute timeout, which costs it a whole step.
+	 */
+	private watchToolCalls(key: string, session: ChatSession, turn: ActiveTurn): void {
+		this.clearToolDeadline(turn);
+		turn.toolDeadline = setTimeout(() => {
+			turn.toolDeadline = undefined;
+			if (turn.finished || turn.streaming || turn.pending.size === 0) {
+				return;
+			}
+			this.log(`Copilot did not pick up the tool call(s) of ${key} within ${Math.round(TOOL_WAIT_TIMEOUT_MS / 1000)}s; ending the turn.`, 'warn');
+			this.failPendingToolCalls(turn, new Error("The chat stopped waiting for this tool call."));
+			this.agent.cancel(session.acp.sessionId);
+			if (session.turn === turn) {
+				session.turn = undefined;
+			}
+			this.disposeCancellations(turn);
+		}, TOOL_WAIT_TIMEOUT_MS);
+	}
+
+	private clearToolDeadline(turn: ActiveTurn): void {
+		clearTimeout(turn.toolDeadline);
+		turn.toolDeadline = undefined;
+	}
+
+	/** Keeps a turn stoppable after its response returned to have Copilot run its tools. */
+	private trackCancellation(turn: ActiveTurn, token: vscode.CancellationToken): void {
+		if (turn.finished) {
+			return;
+		}
+		turn.cancellations.push(token.onCancellationRequested(() => {
+			this.log(`Cancelling the turn of ACP session ${turn.sessionId}`);
+			this.failPendingToolCalls(turn, new Error("The request was cancelled."));
+			this.agent.cancel(turn.sessionId);
+		}));
+	}
+
+	private disposeCancellations(turn: ActiveTurn): void {
+		for (const cancellation of turn.cancellations) {
+			cancellation.dispose();
+		}
+		turn.cancellations.length = 0;
 	}
 
 	/** Settles pending tool calls with the results Copilot just returned. */
@@ -686,6 +798,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			return;
 		}
 		session.turn = undefined;
+		this.clearToolDeadline(turn);
+		this.disposeCancellations(turn);
 		this.failPendingToolCalls(turn, new Error("The turn was abandoned."));
 		this.agent.cancel(session.acp.sessionId);
 		await Promise.race([turn.prompt.then(() => undefined, () => undefined), delay(ABANDONED_TURN_WAIT_MS)]);
@@ -737,6 +851,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 		this.sessions.delete(key);
 		if (session.turn) {
+			this.clearToolDeadline(session.turn);
+			this.disposeCancellations(session.turn);
 			this.failPendingToolCalls(session.turn, new Error("The chat session was closed."));
 			session.turn = undefined;
 		}

@@ -10,6 +10,10 @@ Google's official Antigravity ACP server (`agy_acp_server`, listed in the [ACP r
 
 The extension downloads the server itself, once, from `dl.google.com` (about 130 MB, and only after you choose **Set Up**).
 
+## Install
+
+Install **Google ACP for Copilot** from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=NeoMetric.google-acp-for-copilot), or search for `NeoMetric.google-acp-for-copilot` in the VS Code Extensions view. Updates arrive automatically through VS Code.
+
 ## Set up
 
 1. Run **Google ACP: Set Up** from the Command Palette. It downloads the server and starts it.
@@ -49,6 +53,8 @@ Changing the command or arguments restarts the agent.
 ## How it works
 
 Copilot Chat calls the extension's language model provider. The extension starts the ACP server as a child process rooted in your workspace folder, creates one ACP session per chat, and streams the reply back. Copilot's own tools are offered to the agent through a local MCP bridge, so file edits and terminal commands still go through Copilot's confirmations.
+
+A tool call ends the response so Copilot can run the tool, and the next request carrying its result continues the same turn. A call the agent makes while Copilot is still running another is held for that next response rather than failed, and stopping the chat cancels the agent's turn even after a tool call was handed over.
 
 ## What is not included
 
