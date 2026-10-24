@@ -49,6 +49,13 @@ describe('sessionKey', () => {
 		expect(later).toBe(first);
 	});
 
+	it('keeps one key between turn 1 and turn 2 when opened with a real system message', () => {
+		const turn1 = [system('You are an assistant.'), user('fix the bug')];
+		const turn2 = [system('You are an assistant.'), user('fix the bug'), assistant('done'), user('thanks')];
+
+		expect(sessionKey(turn2)).toBe(sessionKey(turn1));
+	});
+
 	it('separates chats that share a system prompt but open differently', () => {
 		expect(sessionKey([user('system'), user('fix the bug')])).not.toBe(sessionKey([user('system'), user('write a test')]));
 	});
@@ -88,7 +95,11 @@ class FakeAgent {
 		return { sessionId: `acp-${++this.seq}`, configOptions: [] };
 	}
 
-	async closeSession(): Promise<void> { }
+	readonly closed: string[] = [];
+
+	async closeSession(sessionId: string): Promise<void> {
+		this.closed.push(sessionId);
+	}
 
 	async setConfigOption(): Promise<undefined> { return undefined; }
 
@@ -384,5 +395,35 @@ describe('GoogleAcpProvider tool calls', () => {
 		await second;
 
 		expect(agent.sessionCount).toBe(2);
+	});
+
+	it('reuses the session between turn 1 and turn 2 when the chat continues normally', async () => {
+		const token = new CancellationTokenSource();
+		const turn1 = [system('<instructions>Be helpful.</instructions>'), user('hello')];
+		const first = provider.provideLanguageModelChatResponse(model, turn1, options, recorder(), token.token);
+		await waitFor(() => agent.hasTurn);
+		agent.finishTurn();
+		await first;
+
+		const turn2 = [...turn1, assistant('hi'), user('how are you?')];
+		const second = provider.provideLanguageModelChatResponse(model, turn2, options, recorder(), token.token);
+		await waitFor(() => agent.prompts === 2);
+		agent.finishTurn('acp-1');
+		await second;
+
+		expect(agent.sessionCount).toBe(1);
+	});
+
+	it('closes all sessions and cancels active turns when closeAllSessions is called', async () => {
+		const token = new CancellationTokenSource();
+		const turn = [system('<instructions>Be helpful.</instructions>'), user('hello')];
+		const response = provider.provideLanguageModelChatResponse(model, turn, options, recorder(), token.token);
+		await waitFor(() => agent.hasTurn);
+
+		await provider.closeAllSessions();
+		expect(agent.cancelled).toContain('acp-1');
+		expect(agent.closed).toContain('acp-1');
+		agent.finishTurn();
+		await response.catch(() => undefined);
 	});
 });

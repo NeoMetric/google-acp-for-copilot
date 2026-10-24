@@ -29,6 +29,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 		send({ jsonrpc: '2.0', id: message.id, result: { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: message.params.value, options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
 	} else if (message.method === 'session/new') {
 		send({ jsonrpc: '2.0', id: message.id, result: { sessionId: `s${++sessions}`, configOptions: [{ id: 'model', name: 'Model', 		category: 'model', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
+	} else if (message.method === 'session/close') {
+		send({ jsonrpc: '2.0', id: message.id, result: {} });
 	} else if (message.method === 'session/prompt') {
 		const text = message.params.prompt[0].text;
 		const sessionId = message.params.sessionId;

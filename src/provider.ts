@@ -450,8 +450,24 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.changeEmitter.dispose();
 		this.turnEmitter.dispose();
 		this.cacheStatsEmitter.dispose();
-		for (const key of [...this.sessions.keys()]) {
-			void this.destroySession(key);
+		void this.closeAllSessions();
+	}
+
+	async closeAllSessions(): Promise<void> {
+		const keys = [...this.sessions.keys()];
+		await Promise.allSettled([
+			this.closeWarmSession(),
+			...keys.map(key => this.destroySession(key)),
+		]);
+	}
+
+	private async closeWarmSession(): Promise<void> {
+		const warm = this.warmSession;
+		this.warmSession = undefined;
+		this.warmSessionCreation = undefined;
+		if (warm) {
+			await this.agent.closeSession(warm.sessionId);
+			this.log(`Closed warm session (${warm.sessionId}).`);
 		}
 	}
 
@@ -1001,6 +1017,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			this.clearToolDeadline(session.turn);
 			this.disposeCancellations(session.turn);
 			this.failPendingToolCalls(session.turn, new Error("The chat session was closed."));
+			this.agent.cancel(session.acp.sessionId);
 			session.turn = undefined;
 		}
 		this.bridge.unregisterSession(session.endpoint.token);
@@ -1015,8 +1032,12 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		for (const key of [...this.sessions.keys()]) {
 			void this.destroySession(key);
 		}
-		this.warmSession = undefined;
-		this.warmSessionCreation = undefined;
+		if (change !== 'exited') {
+			void this.closeWarmSession();
+		} else {
+			this.warmSession = undefined;
+			this.warmSessionCreation = undefined;
+		}
 
 		if (change === 'restarted') {
 			// The account may have changed, and with it the models on offer.
@@ -1096,7 +1117,11 @@ export function sessionKey(messages: readonly vscode.LanguageModelChatRequestMes
 	const workspace = workspaceFoldersOf(messages)?.[0] ?? (windowFolder ? windowFolder.uri.toString() : 'no-workspace');
 	const conversation = conversationIdOf(options) ?? '';
 	// The system prompt is left out: the host renders it afresh for each request.
-	const opening = messages.filter(message => !isSystemMessage(message)).slice(0, 2).map(fingerprint).join('\n');
+	// Only messages before the first assistant reply belong to the opening of the chat;
+	// later turns add subsequent user prompts and assistant replies that must not change the key.
+	const firstAssistant = messages.findIndex(message => message.role === vscode.LanguageModelChatMessageRole.Assistant);
+	const openingMessages = firstAssistant >= 0 ? messages.slice(0, firstAssistant) : messages;
+	const opening = openingMessages.filter(message => !isSystemMessage(message)).slice(0, 2).map(fingerprint).join('\n');
 	return `${workspace}#${conversation}#${createHash('sha1').update(opening).digest('hex').slice(0, 12)}`;
 }
 

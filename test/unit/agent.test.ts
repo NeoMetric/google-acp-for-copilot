@@ -104,6 +104,12 @@ describe('AgentClient', () => {
 		expect(result.usage).toMatchObject({ inputTokens: 3, outputTokens: 2, totalTokens: 5 });
 	});
 
+	it('closes a session cleanly', async () => {
+		const client = createAgent();
+		const session = await client.createSession({ cwd: temp, mcpServers: [] });
+		await expect(client.closeSession(session.sessionId)).resolves.toBeUndefined();
+	});
+
 	it('answers permission requests by itself in auto mode', async () => {
 		const client = createAgent();
 		const session = await client.createSession({ cwd: temp, mcpServers: [] });
