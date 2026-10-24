@@ -103,14 +103,21 @@ class FakeAgent {
 
 	async setConfigOption(): Promise<undefined> { return undefined; }
 
+	/** The text of each prompt the provider sent, in order. */
+	readonly promptTexts: string[] = [];
+
 	cancel(sessionId: string): void {
 		this.cancelled.push(sessionId);
+		// A cancelled turn ends, as it does with the real agent.
+		this.finishes.get(sessionId)?.();
+		this.finishes.delete(sessionId);
 	}
 
 	/** Runs one turn that only ends when the test says so. */
-	async prompt(sessionId: string): Promise<{ stopReason: string }> {
+	async prompt(sessionId: string, blocks: ReadonlyArray<{ type: string; text?: string }> = []): Promise<{ stopReason: string }> {
 		this.prompted = true;
 		this.promptCalls++;
+		this.promptTexts.push(blocks.map(block => block.text ?? '').join('\n'));
 		return new Promise(resolve => this.finishes.set(sessionId, () => resolve({ stopReason: 'end_turn' })));
 	}
 
@@ -259,6 +266,81 @@ describe('GoogleAcpProvider tool calls', () => {
 		expect(agent.cancelled).toEqual(['acp-1']);
 		expect((await result).result.isError).toBe(true);
 		expect((await result).result.content[0].text).toContain('cancelled');
+	});
+
+	it('sends a message typed while a tool ran as a new prompt in the same session', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+
+		const first = request(history, token.token);
+		const result = callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		const [call] = toolCallsOf(first.progress);
+
+		history.push(assistant('working'), user(toolResult(call.callId), 'wait, use b.txt instead'));
+		const second = request(history, token.token);
+		await waitFor(() => agent.prompts === 2);
+
+		expect(agent.cancelled).toEqual(['acp-1']);
+		expect(agent.sessionCount).toBe(1);
+		expect((await result).result.isError).toBe(true);
+		expect(agent.promptTexts[1]).toBe('wait, use b.txt instead');
+
+		agent.finishTurn();
+		await second.response;
+	});
+
+	it('continues the running turn for the result of a call the agent already gave up on', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+
+		const first = request(history, token.token);
+		const result = callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		const [call] = toolCallsOf(first.progress);
+
+		// The call is settled on the agent's side, so the result has nothing to answer.
+		(provider as unknown as { sessions: Map<string, { turn: { pending: Map<string, unknown> } }> }).sessions.forEach(session => session.turn.pending.clear());
+		void result;
+
+		history.push(assistant('working'), user(toolResult(call.callId)));
+		const second = request(history, token.token);
+		await delay(50);
+
+		expect(agent.cancelled).toEqual([]);
+		expect(agent.prompts).toBe(1);
+
+		agent.finishTurn();
+		await second.response;
+	});
+
+	it('does not send the first message again after an abandoned turn', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+
+		const first = request(history, token.token);
+		void callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		const [call] = toolCallsOf(first.progress);
+
+		history.push(assistant('working'), user(toolResult(call.callId), 'stop'));
+		const second = request(history, token.token);
+		await waitFor(() => agent.prompts === 2);
+		agent.finishTurn();
+		await second.response;
+
+		history.push(assistant('ok'), user('thanks'));
+		const third = request(history, token.token);
+		await waitFor(() => agent.prompts === 3);
+
+		expect(agent.sessionCount).toBe(1);
+		expect(agent.promptTexts[2]).toBe('thanks');
+
+		agent.finishTurn();
+		await third.response;
 	});
 
 	it('refuses a tool call once its turn has ended', async () => {

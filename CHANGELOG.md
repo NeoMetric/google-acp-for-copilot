@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5 - 2026-10-24
+
+### Fixed
+
+- A message typed while a tool call is running now ends that turn and reaches the agent as a new prompt in the same session. Copilot delivers it beside the tool results, so it used to be folded into them and the agent never read it.
+- The result of a tool call the agent already gave up on, such as one that timed out, no longer makes the next request look like a new conversation. The running turn still answers the request and the result is dropped.
+- A turn that never finished, because a tool call was abandoned or the user stopped it, no longer makes the next request look like the start of the chat, so the first message is not sent to the agent a second time.
+
 ## 0.1.4 - 2026-10-24
 
 ### Added

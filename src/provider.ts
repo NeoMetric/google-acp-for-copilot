@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 import { type AcpSessionUpdate, AgentNotFoundError, type AgentChange, type AgentClient, type AgentSession, type PromptResult, workspaceCwd } from './agent';
 import { type McpBridge, type McpServerEndpoint, type McpToolResult } from './bridge';
-import { chatContextBlock, diverged, fingerprint, isSystemMessage, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, type AcpContentBlock } from './convert';
+import { carriesToolResults, chatContextBlock, diverged, fingerprint, firstMessageAfterReply, isSystemMessage, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, userWordsAfterReply, type AcpContentBlock } from './convert';
 import { scopedLog, type Log, type LogLevel } from './logging';
 import { acpModelValue, effortLevelsOf, effortOf, findEffortOption, findModelOption, flattenChoices, toModelVariants } from './models';
 import { conversationIdOf, resolveCwd, systemGuidanceOf, workspaceFoldersOf } from './requestContext';
@@ -312,7 +312,22 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		// Copilot ran the tools of the pending turn: hand the results back to the
 		// agent and keep streaming the same turn into this response. The tools of the
 		// session stay as they are until the turn ends, so a result is never dropped.
-		if (session && session.turn && this.resolveToolResults(session.turn, messages)) {
+		// A message the user typed while the turn ran comes next to those results. As
+		// natively, it ends the turn and starts a new one, so it falls through below.
+		const userWords = session?.turn ? userWordsAfterReply(messages) : [];
+		if (session && session.turn && userWords.length === 0 && this.resolveToolResults(session.turn, messages)) {
+			this.markSeen(session, fingerprints);
+			this.applyTools(session, tools);
+			await this.applyEffort(session, effort);
+			this.trackCancellation(session.turn, token);
+			await this.driveTurn(key, session, progress, token, fingerprints);
+			return;
+		}
+		// The result of a call that already ended, such as one that timed out: the agent
+		// went on without it, so the running turn is still the one to answer this request.
+		if (session && session.turn && !session.turn.finished && userWords.length === 0 && carriesToolResults(messages)) {
+			this.log(`Late tool results for ${key}; the turn is still running, so this response continues it.`);
+			this.markSeen(session, fingerprints);
 			this.applyTools(session, tools);
 			await this.applyEffort(session, effort);
 			this.trackCancellation(session.turn, token);
@@ -386,9 +401,19 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			throw new vscode.LanguageModelError("There is no user message to send to the agent.");
 		}
 
+		// The agent has been given everything up to here. A turn that never finishes, because
+		// a tool call is abandoned or the user stops it, must not make the next request look
+		// like the start of the chat and send the first message again.
+		this.markSeen(session, fingerprints);
 		session.turn = this.startTurn(session, progress, token, blocks);
 		this.trackCancellation(session.turn, token);
 		await this.driveTurn(key, session, progress, token, fingerprints);
+	}
+
+	/** Records that the agent has been given every message of this request. */
+	private markSeen(session: ChatSession, fingerprints: readonly string[]): void {
+		session.history.length = 0;
+		session.history.push(...fingerprints);
 	}
 
 	async provideTokenCount(_model: vscode.LanguageModelChatInformation, value: string | vscode.LanguageModelChatRequestMessage, _token: vscode.CancellationToken): Promise<number> {
@@ -924,12 +949,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 
 		// Only the messages after the last assistant reply can answer the pending
 		// calls; older results in the history belong to calls that already settled.
-		let firstNew = messages.length;
-		while (firstNew > 0 && messages[firstNew - 1].role !== vscode.LanguageModelChatMessageRole.Assistant) {
-			firstNew--;
-		}
-
-		for (const message of messages.slice(firstNew)) {
+		for (const message of messages.slice(firstMessageAfterReply(messages))) {
 			if (message.role !== vscode.LanguageModelChatMessageRole.User) {
 				continue;
 			}

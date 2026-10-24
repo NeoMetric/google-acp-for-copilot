@@ -230,6 +230,31 @@ export function lastUserMessageIndex(messages: readonly vscode.LanguageModelChat
 	return Math.max(lastUser, 0);
 }
 
+/** Where the messages the agent has not answered start: right after its last reply. */
+export function firstMessageAfterReply(messages: readonly vscode.LanguageModelChatRequestMessage[]): number {
+	let first = messages.length;
+
+	while (first > 0 && messages[first - 1].role !== vscode.LanguageModelChatMessageRole.Assistant) {
+		first--;
+	}
+
+	return first;
+}
+
+/**
+ * What the user said since the agent's last reply, apart from tool results.
+ * Copilot delivers a message typed while a turn runs next to the results of the
+ * tool call that was waiting, so it arrives in the request that would continue the turn.
+ */
+export function userWordsAfterReply(messages: readonly vscode.LanguageModelChatRequestMessage[]): AcpContentBlock[] {
+	return toAcpContentBlocks(messages.slice(firstMessageAfterReply(messages)));
+}
+
+/** Whether the messages since the agent's last reply carry a tool result. */
+export function carriesToolResults(messages: readonly vscode.LanguageModelChatRequestMessage[]): boolean {
+	return messages.slice(firstMessageAfterReply(messages)).some(message => message.content.some(part => part instanceof vscode.LanguageModelToolResultPart));
+}
+
 /** Upper bound for the restored conversation, so a long chat cannot swamp the new turn. */
 export const TRANSCRIPT_MAX_CHARACTERS = 40_000;
 
