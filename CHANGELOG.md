@@ -1,20 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-10-24
+
+### Added
 
 - The agent is now told, for every tool the chat offers, which arguments that tool's schema requires. Antigravity reaches the chat's tools through a generic wrapper and otherwise skips arguments such as a terminal command's `description`, which leaves the command as the title of the call. The list is read from the schema Copilot publishes, so a renamed or added argument needs no code change.
 - The reminders Copilot repeats beside each request now reach the agent. They carry the editing contract for the tools it calls through Copilot: `...existing code...` for `insert_edit_into_file`, the surrounding lines to quote for `replace_string_in_file`, and the preference for the multi-replace tool.
 - The context Copilot builds for the whole chat now reaches the agent too, once, when a session starts: the operating system, the layout of the workspace, the user preferences and the memory the host had loaded. It was dropped before, so the agent had to rediscover the workspace with tools.
 - Each request keeps the tools the user pointed at with `#tool`, the notebook formatting instructions, and the attachments — in the order Copilot writes them.
-- The guidance Copilot writes into its system prompt now reaches the agent: the working directory, the repository rules, the tool directory and the user's preferences. It is appended ahead of the skills and instruction files, and every system message contributes instead of only the first. The identity preamble and Copilot's own memory rules are dropped, since the agent has a prompt and a memory section of its own.
-- Skills, instruction files and custom-file pointers that Copilot already writes into its own system prompt are no longer added a second time. A workspace with `copilot-instructions.md` and a large skill folder was paying for every one of them twice.
-- The memory section names the file reader the chat actually offers — `read_file` through the MCP bridge when Copilot offers it, `view` otherwise — instead of always `view`.
+- The guidance Copilot writes into its system prompt now reaches the agent: the working directory, the repository rules, the tool directory and the user's preferences. Every system message contributes instead of only the first. Only the identity preamble is left out, since the agent has a prompt of its own.
 - A chat session is rebuilt when Copilot starts offering a tool the session never saw, such as `task_complete` when autopilot is switched on, or when Copilot describes the chat differently, such as switching between asking and working. The conversation is restored into the new session. A session opened by a request that offered no tools, such as a chat title, gets the workspace prompt on the first request that offers them.
 - A request that offers no tools no longer empties the chat's tool list or pays for a workspace prompt the agent could not act on, since it has no tool to read a file with.
 - A request that carries no text fails with a clear error instead of sending an earlier message to the agent a second time.
 - A tool the user disables now stops being offered to the agent, and one they enable starts being callable, without the chat starting over. The bridge announces `notifications/tools/list_changed` over an MCP notification stream and answers `initialize` with that capability.
 - The output channel now names every request: the model, the message count, and the full list of tools sent with it. Closing a chat session is logged too.
 - A system prompt the host re-renders between requests, such as one that spells a drive letter in another case, no longer looks like a rewritten history and no longer restarts the session.
+
+### Removed
+
+- The extension no longer lists skills of its own, and `SKILLS_CHAR_BUDGET` and the `## Skills` section are gone. Copilot renders the skill list into the system prompt of every harness it offers, and that prompt now reaches the agent, so listing them again only paid for them twice: the entry carried no file path on the agent host, so every skill was repeated. Copilot's list wins outright, so its own filtering is honoured too. `chat.useAgentSkills` and `chat.agentSkillsLocations` are now Copilot's to apply, and `src/skills.ts` is deleted with its tests.
+- The extension no longer lists custom agents either, and no longer reads `*.agent.md` files or consults `chat.agentFilesLocations`. Both harnesses list the agents themselves — the chat panel in an `<agents>` block, the agent host in its `task` tool — with names and descriptions, and neither prints a file path, so every agent was repeated with only its path new.
+- Instruction files are no longer read and inlined into the prompt: `loadInstructions`, the 20,000-character instruction budget and the `## Instructions from …` sections are gone. Copilot lists `copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md` and `*.instructions.md` in its own index with their paths, and the agent reads the one that applies, as Copilot intends. Every `*.instructions.md` is now a pointer, including one whose `applyTo` covers everything.
+- The memory section the extension added is removed, together with the tool list it was gated on. Copilot's own rules for the `memory` tool are forwarded instead.
+
+### Fixed
+
+- A `*.instructions.md` or `*.prompt.md` file that Copilot already names in its own system prompt is no longer pointed out a second time. One it does not name is still listed, so the agent can read it when it applies.
+- Copilot's memory rules are forwarded as they stand, and the memory section the extension wrote in their place is gone. The rules describe the same `/memories/` tool the chat offers, with its scopes and the note-keeping guidelines, so Copilot owns memory end to end. Its claim that user memory is loaded into the context is true here: those blocks are forwarded once per session with the rest of the chat context.
+- The identity preamble keeps the host's rules for what the model may produce: `Follow Microsoft content policies`, the copyright line and the refusal for harmful content now reach the agent, carried in the intro the extension writes in place of the host's identity.
 
 ## 0.1.3 - 2026-10-24
 
