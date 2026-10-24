@@ -52,13 +52,19 @@ Changing the command or arguments restarts the agent.
 
 ## How it works
 
-Copilot Chat calls the extension's language model provider. The extension starts the ACP server as a child process rooted in your workspace folder, creates one ACP session per chat, and streams the reply back. Copilot's own tools are offered to the agent through a local MCP bridge, so file edits and terminal commands still go through Copilot's confirmations.
+Copilot Chat calls the extension's language model provider. The extension starts the ACP server as a child process rooted in the folder of the chat, creates one ACP session per chat, and streams the reply back. Copilot's own tools are offered to the agent through a local MCP bridge, so file edits and terminal commands still go through Copilot's confirmations. The bridge tells the agent when the chat's tool list changes, so a tool the user disables stops being offered and one they enable starts being callable without starting the chat over.
+
+Only your request, its attachments, the editor selection and the state Copilot reports for that turn are forwarded. The reminders Copilot repeats beside a request carry the editing contract for the tools it calls through Copilot, so they go along with it. The context Copilot builds for the whole chat — the operating system, the layout of the workspace and the memory it loaded — is forwarded once, when a session starts, and the guidance Copilot writes in its system prompt is appended to the agent's own prompt.
 
 A tool call ends the response so Copilot can run the tool, and the next request carrying its result continues the same turn. A call the agent makes while Copilot is still running another is held for that next response rather than failed, and stopping the chat cancels the agent's turn even after a tool call was handed over.
 
+A chat session is rebuilt when the chat's history no longer matches what it has seen, when Copilot starts offering a tool the session never saw, or when Copilot describes the chat differently, for example when autopilot is switched on. The conversation is restored into the new session from the messages Copilot still has.
+
+The **Google ACP** output channel names every request at the default Info level — the model, the message count and the full list of tools sent with it — and logs a chat session when it opens and when it closes.
+
 ## Skills and customizations
 
-Skills (folders with a `SKILL.md` in `.copilot/skills`, `.claude/skills`, `.agents/skills`, `.github/skills`, or directories configured in `chat.agentSkillsLocations`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) are automatically discovered and included in the session's system prompt so Google Antigravity can use them.
+Skills (folders with a `SKILL.md` in `.copilot/skills`, `.claude/skills`, `.agents/skills`, `.github/skills`, or directories configured in `chat.agentSkillsLocations`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) are automatically discovered and included in the session's system prompt so Google Antigravity can use them. Whatever Copilot already writes into its own system prompt is left out, so nothing is paid for twice. The memory section names the file reader the chat actually offers.
 
 ## What is not included
 

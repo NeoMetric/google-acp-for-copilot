@@ -20,6 +20,24 @@ describe('buildSystemPromptAppend', () => {
 		expect(buildSystemPromptAppend({ skills: [], instructions: [], toolNames: ['run_in_terminal'] })).toBeUndefined();
 	});
 
+	it('forwards the guidance the host rendered for the chat, before what the folders carry', () => {
+		const text = buildSystemPromptAppend({
+			skills: [skill('review')],
+			instructions: [{ source: 'app/AGENTS.md', text: 'Use tabs.' }],
+			toolNames: [],
+			guidance: '<environment_context>\n* Current working directory: c:\\repo\n</environment_context>',
+		})!;
+
+		expect(text).toContain('* Current working directory: c:\\repo');
+		expect(text.indexOf('Current working directory')).toBeLessThan(text.indexOf('## Instructions from app/AGENTS.md'));
+		expect(text.indexOf('Current working directory')).toBeLessThan(text.indexOf('## Skills'));
+	});
+
+	it('forwards guidance even when the folders carry nothing', () => {
+		expect(buildSystemPromptAppend({ skills: [], instructions: [], toolNames: [], guidance: '<environment_context>Go.</environment_context>' }))
+			.toContain('<environment_context>Go.</environment_context>');
+	});
+
 	it('lists each skill with its description and file', () => {
 		const text = buildSystemPromptAppend({ skills: [skill('review'), skill('tidy')], instructions: [], toolNames: allTools })!;
 
@@ -38,8 +56,49 @@ describe('buildSystemPromptAppend', () => {
 		const withoutMemory = buildSystemPromptAppend({ skills: [skill('a')], instructions: [], toolNames: ['read_file'] })!;
 
 		expect(withMemory).toContain('`memory` tool of the `vscode` MCP server');
-		expect(withMemory).toContain('Nothing from it is loaded for you');
+		expect(withMemory).toContain('Anything listed above is what has been loaded for you');
 		expect(withoutMemory).not.toContain('## Memory');
+	});
+
+	it('names the file reader each harness offers, so the memory section can be followed', () => {
+		const panel = buildSystemPromptAppend({ skills: [], instructions: [], toolNames: ['read_file', 'memory'] })!;
+		const agentHost = buildSystemPromptAppend({ skills: [], instructions: [], toolNames: ['view', 'memory'] })!;
+
+		expect(panel).toContain('the `read_file` tool of the `vscode` MCP server');
+		expect(agentHost).toContain('`view`');
+		expect(agentHost).not.toContain('read_file');
+	});
+
+	it('does not repeat what the guidance already carries, so nothing is paid for twice', () => {
+		const text = buildSystemPromptAppend({
+			skills: [skill('review')],
+			instructions: [{ source: 'repo/AGENTS.md', text: 'Use tabs, never spaces.' }],
+			customFiles: [{ kind: 'instructions', name: 'ts', description: '', file: '/repo/.github/instructions/ts.instructions.md', applyTo: '**/*.ts' }],
+			toolNames: allTools,
+			guidance: [
+				'<instructions>',
+				'Use tabs, never spaces.',
+				'<skills><skill><name>review</name><file>/skills/review/SKILL.md</file></skill></skills>',
+				'<instruction><file>/repo/.github/instructions/ts.instructions.md</file></instruction>',
+				'</instructions>',
+			].join('\n'),
+		})!;
+
+		expect(text).not.toContain('## Instructions from repo/AGENTS.md');
+		expect(text).not.toContain('## Skills');
+		expect(text).not.toContain('## Instruction files for specific files');
+	});
+
+	it('still lists them when the guidance of the host does not carry them', () => {
+		const text = buildSystemPromptAppend({
+			skills: [skill('review')],
+			instructions: [{ source: 'repo/AGENTS.md', text: 'Use tabs, never spaces.' }],
+			toolNames: allTools,
+			guidance: '<code_change_instructions>Make precise, surgical changes.</code_change_instructions>',
+		})!;
+
+		expect(text).toContain('## Instructions from repo/AGENTS.md');
+		expect(text).toContain('- review:');
 	});
 
 	it('stops listing skills at the budget and says how many were left out', () => {

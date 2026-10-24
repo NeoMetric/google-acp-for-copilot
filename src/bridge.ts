@@ -64,6 +64,8 @@ export class McpBridge implements vscode.Disposable {
 	private server: http.Server | undefined;
 	private starting: Promise<void> | undefined;
 	private readonly sessions = new Map<string, McpSession>();
+	/** The open notification streams of each session, by token. */
+	private readonly streams = new Map<string, Set<http.ServerResponse>>();
 	private disposed = false;
 
 	constructor(private readonly log: Log) { }
@@ -84,20 +86,35 @@ export class McpBridge implements vscode.Disposable {
 		return { url: `http://127.0.0.1:${address.port}/`, token };
 	}
 
-	/** Replaces the tool set of an existing ACP session. */
+	/**
+	 * Replaces the tool set of an existing ACP session and tells the agent, so a
+	 * tool the user just disabled stops being offered and one just enabled starts
+	 * being callable without starting a new session.
+	 */
 	updateTools(token: string, tools: readonly vscode.LanguageModelChatTool[]): void {
 		const session = this.sessions.get(token);
-		if (session) {
-			this.sessions.set(token, { ...session, tools });
+		if (!session) {
+			return;
 		}
+		this.sessions.set(token, { ...session, tools });
+		if (sameToolNames(session.tools, tools)) {
+			return;
+		}
+
+		this.log(`Tool set of an agent session changed to ${tools.length} tool(s); telling the agent.`);
+		this.notify(token, 'notifications/tools/list_changed');
 	}
 
 	unregisterSession(token: string): void {
 		this.sessions.delete(token);
+		this.closeStreams(token);
 	}
 
 	dispose(): void {
 		this.disposed = true;
+		for (const token of [...this.streams.keys()]) {
+			this.closeStreams(token);
+		}
 		this.sessions.clear();
 		this.server?.close();
 		this.server = undefined;
@@ -157,8 +174,14 @@ export class McpBridge implements vscode.Disposable {
 			return;
 		}
 
+		if (request.method === 'GET') {
+			// The agent keeps this stream open to hear that the tool list changed.
+			this.openStream(this.tokenOf(request), response);
+			return;
+		}
+
 		if (request.method !== 'POST') {
-			response.setHeader('allow', 'POST');
+			response.setHeader('allow', 'GET, POST');
 			sendJson(response, 405, { error: "Method not allowed" });
 			return;
 		}
@@ -222,6 +245,64 @@ export class McpBridge implements vscode.Disposable {
 		return this.sessions.get(header.slice('Bearer '.length));
 	}
 
+	/** The token a request authenticated with, which names its session and its streams. */
+	private tokenOf(request: http.IncomingMessage): string {
+		return (request.headers.authorization ?? '').slice('Bearer '.length);
+	}
+
+	/** Opens the server-to-client stream an MCP client reads notifications from. */
+	private openStream(token: string, response: http.ServerResponse): void {
+		response.writeHead(200, {
+			'content-type': 'text/event-stream',
+			'cache-control': 'no-store',
+			'connection': 'keep-alive',
+		});
+		// An idle stream is normal: the tool list changes only when the user does.
+		response.setTimeout(0);
+		response.write(': waiting for notifications\n\n');
+
+		const streams = this.streams.get(token) ?? new Set<http.ServerResponse>();
+		streams.add(response);
+		this.streams.set(token, streams);
+		this.log(`Opened a notification stream for an agent session (${streams.size} open).`);
+
+		const forget = () => {
+			streams.delete(response);
+			if (streams.size === 0 && this.streams.get(token) === streams) {
+				this.streams.delete(token);
+			}
+		};
+		response.on('close', forget);
+		response.on('error', forget);
+	}
+
+	/** Writes one JSON-RPC notification to every open stream of a session. */
+	private notify(token: string, method: string, params?: unknown): void {
+		const streams = this.streams.get(token);
+		if (!streams || streams.size === 0) {
+			return;
+		}
+
+		const message = JSON.stringify({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) });
+		for (const stream of streams) {
+			if (stream.writableEnded || stream.destroyed) {
+				continue;
+			}
+			stream.write(`event: message\ndata: ${message}\n\n`);
+		}
+		this.log(`Sent ${method} to ${streams.size} notification stream(s).`);
+	}
+
+	private closeStreams(token: string): void {
+		const streams = this.streams.get(token);
+		this.streams.delete(token);
+		for (const stream of streams ?? []) {
+			if (!stream.writableEnded && !stream.destroyed) {
+				stream.end();
+			}
+		}
+	}
+
 	private async createResponse(message: JsonRpcMessage, session: McpSession, response: http.ServerResponse): Promise<object | undefined> {
 		const id = message.id;
 		if (id === undefined || id === null) {
@@ -276,7 +357,7 @@ export class McpBridge implements vscode.Disposable {
 
 		return {
 			protocolVersion,
-			capabilities: { tools: { listChanged: false } },
+			capabilities: { tools: { listChanged: true } },
 			serverInfo: { name: 'vscode', version: '1.0.0' },
 		};
 	}
@@ -333,6 +414,15 @@ export class McpBridge implements vscode.Disposable {
 
 function isLoopbackHost(host: string | undefined): boolean {
 	return host === undefined || /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host);
+}
+
+/** Whether two tool sets offer the same names, whatever their order or definitions. */
+function sameToolNames(before: readonly vscode.LanguageModelChatTool[], after: readonly vscode.LanguageModelChatTool[]): boolean {
+	if (before.length !== after.length) {
+		return false;
+	}
+	const names = new Set(before.map(tool => tool.name));
+	return after.every(tool => names.has(tool.name));
 }
 
 export function toMcpContent(content: ReadonlyArray<unknown>): Array<Record<string, unknown>> {

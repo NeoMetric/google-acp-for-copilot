@@ -7,9 +7,39 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as vscode from 'vscode';
 import type { AgentClient, CreateSessionOptions } from '../../src/agent';
 import { McpBridge } from '../../src/bridge';
-import { GoogleAcpProvider, sessionKey } from '../../src/provider';
-import { assistant, toolResult, user } from './messages';
+import { GoogleAcpProvider, guidanceDiffers, offersNewTools, sessionKey } from '../../src/provider';
+import { assistant, system, toolResult, user } from './messages';
 import { CancellationTokenSource, LanguageModelToolCallPart } from './vscode-mock';
+
+describe('offersNewTools', () => {
+	const tool = (name: string) => ({ name, description: '', inputSchema: { type: 'object' } });
+
+	it('is false while Copilot offers the tools the session already saw', () => {
+		expect(offersNewTools(new Set(['read_file', 'memory']), [tool('memory'), tool('read_file')])).toBe(false);
+	});
+
+	it('is true when Copilot offers a tool the session never saw', () => {
+		expect(offersNewTools(new Set(['read_file']), [tool('read_file'), tool('task_complete')])).toBe(true);
+	});
+
+	it('ignores a tool the session no longer offers', () => {
+		expect(offersNewTools(new Set(['read_file', 'memory']), [tool('read_file')])).toBe(false);
+	});
+});
+
+describe('guidanceDiffers', () => {
+	it('sees no change when only the casing or the spacing differs', () => {
+		expect(guidanceDiffers('<instructions>Work on C:\\repo.</instructions>', '<instructions>Work   on c:\\repo.</instructions>')).toBe(false);
+	});
+
+	it('sees a change when the host now describes the chat differently', () => {
+		expect(guidanceDiffers('<instructions>Ask.</instructions>', '<instructions>Work.</instructions>')).toBe(true);
+	});
+
+	it('sees a change when the host stops sending guidance', () => {
+		expect(guidanceDiffers('<instructions>Work.</instructions>', undefined)).toBe(true);
+	});
+});
 
 describe('sessionKey', () => {
 	it('keeps one key as a chat grows', () => {
@@ -21,6 +51,13 @@ describe('sessionKey', () => {
 
 	it('separates chats that share a system prompt but open differently', () => {
 		expect(sessionKey([user('system'), user('fix the bug')])).not.toBe(sessionKey([user('system'), user('write a test')]));
+	});
+
+	it('does not let a re-rendered system message start a new session', () => {
+		const before = [system('Git repository root: C:\\repo'), user('fix the bug')];
+		const after = [system('Git repository root: c:\\repo'), user('fix the bug')];
+
+		expect(sessionKey(after)).toBe(sessionKey(before));
 	});
 });
 
@@ -38,6 +75,7 @@ class FakeAgent {
 	private readonly endpoints: Array<{ url: string; authorization: string }> = [];
 	private readonly finishes = new Map<string, () => void>();
 	private prompted = false;
+	private promptCalls = 0;
 	private seq = 0;
 
 	readonly onDidChange = () => ({ dispose() { } });
@@ -61,6 +99,7 @@ class FakeAgent {
 	/** Runs one turn that only ends when the test says so. */
 	async prompt(sessionId: string): Promise<{ stopReason: string }> {
 		this.prompted = true;
+		this.promptCalls++;
 		return new Promise(resolve => this.finishes.set(sessionId, () => resolve({ stopReason: 'end_turn' })));
 	}
 
@@ -71,6 +110,16 @@ class FakeAgent {
 
 	get hasTurn(): boolean {
 		return this.prompted;
+	}
+
+	/** How many turns the provider has started, so a new one can be awaited. */
+	get prompts(): number {
+		return this.promptCalls;
+	}
+
+	/** How many ACP sessions the provider opened, so a rebuild can be spotted. */
+	get sessionCount(): number {
+		return this.endpoints.length;
 	}
 
 	get endpoint(): { url: string; authorization: string } {
@@ -243,5 +292,97 @@ describe('GoogleAcpProvider tool calls', () => {
 			outputTokens: 50,
 			model: 'gemini-test',
 		});
+	});
+
+	/** The tools the agent can see right now, as the bridge lists them. */
+	const listedTools = async () => {
+		const response = await fetch(agent.endpoint.url, {
+			method: 'POST',
+			headers: { authorization: agent.endpoint.authorization, 'content-type': 'application/json' },
+			body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' }),
+		});
+		const body = await response.json() as { result: { tools: Array<{ name: string }> } };
+		return body.result.tools.map(tool => tool.name);
+	};
+
+	it('ignores the empty tool set of a request Copilot made for itself', async () => {
+		const token = new CancellationTokenSource();
+		const opening = [user('system'), user('hello')];
+		const first = request(opening, token.token);
+		await waitFor(() => agent.hasTurn);
+		agent.finishTurn();
+		await first.response;
+
+		// A chat title arrives with no tools; it says nothing about what the chat may use.
+		const title = { tools: [] } as unknown as vscode.ProvideLanguageModelChatResponseOptions;
+		const titled = provider.provideLanguageModelChatResponse(model, [...opening, assistant('ok'), user('go on')], title, recorder(), token.token);
+		await waitFor(() => agent.prompts === 2);
+		const listed = await listedTools();
+		agent.finishTurn();
+		await titled;
+
+		expect(listed).toEqual(['read_file', 'grep']);
+		expect(agent.sessionCount).toBe(1);
+	});
+
+	it('gives a chat that opened without tools a session with the workspace prompt', async () => {
+		provider.dispose();
+		const promptTools: number[] = [];
+		provider = new GoogleAcpProvider(agent as unknown as AgentClient, bridge, silentOutput(), undefined, async (sessionTools) => {
+			promptTools.push(sessionTools.length);
+			return 'appended';
+		});
+
+		const token = new CancellationTokenSource();
+		const opening = [user('system'), user('hello')];
+		const title = { tools: [] } as unknown as vscode.ProvideLanguageModelChatResponseOptions;
+		const titled = provider.provideLanguageModelChatResponse(model, opening, title, recorder(), token.token);
+		await waitFor(() => agent.prompts === 1);
+		agent.finishTurn();
+		await titled;
+
+		expect(promptTools).toEqual([]);
+
+		const worked = provider.provideLanguageModelChatResponse(model, [...opening, assistant('ok'), user('the real work')], options, recorder(), token.token);
+		await waitFor(() => agent.prompts === 2);
+		agent.finishTurn('acp-2');
+		await worked;
+
+		expect(promptTools).toEqual([2]);
+		expect(agent.sessionCount).toBe(2);
+	});
+
+	it('gives the chat a new session when Copilot starts offering a tool it never saw', async () => {
+		const token = new CancellationTokenSource();
+		const opening = [user('system'), user('hello')];
+		const first = request(opening, token.token);
+		await waitFor(() => agent.hasTurn);
+		agent.finishTurn();
+		await first.response;
+
+		const more = { tools: [...tools, { name: 'task_complete', description: 'Finishes', inputSchema: { type: 'object' } }] } as unknown as vscode.ProvideLanguageModelChatResponseOptions;
+		const second = provider.provideLanguageModelChatResponse(model, [...opening, assistant('ok'), user('go on')], more, recorder(), token.token);
+		await waitFor(() => agent.prompts === 2);
+		agent.finishTurn('acp-2');
+		await second;
+
+		expect(agent.sessionCount).toBe(2);
+	});
+
+	it('gives the chat a new session when the host describes it differently', async () => {
+		const token = new CancellationTokenSource();
+		const opening = [system('<instructions>Ask before changing anything.</instructions>'), user('hello')];
+		const first = provider.provideLanguageModelChatResponse(model, opening, options, recorder(), token.token);
+		await waitFor(() => agent.hasTurn);
+		agent.finishTurn();
+		await first;
+
+		const changed = [system('<instructions>Make the change now.</instructions>'), user('hello')];
+		const second = provider.provideLanguageModelChatResponse(model, [...changed, assistant('ok'), user('go on')], options, recorder(), token.token);
+		await waitFor(() => agent.prompts === 2);
+		agent.finishTurn('acp-2');
+		await second;
+
+		expect(agent.sessionCount).toBe(2);
 	});
 });

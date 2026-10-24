@@ -7,9 +7,10 @@ import { createHash, randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 import { type AcpSessionUpdate, AgentNotFoundError, type AgentChange, type AgentClient, type AgentSession, type PromptResult, workspaceCwd } from './agent';
 import { type McpBridge, type McpServerEndpoint, type McpToolResult } from './bridge';
-import { diverged, fingerprint, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, type AcpContentBlock } from './convert';
+import { chatContextBlock, diverged, fingerprint, isSystemMessage, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, type AcpContentBlock } from './convert';
 import { scopedLog, type Log, type LogLevel } from './logging';
 import { acpModelValue, effortLevelsOf, effortOf, findEffortOption, findModelOption, flattenChoices, toModelVariants } from './models';
+import { conversationIdOf, resolveCwd, systemGuidanceOf, workspaceFoldersOf } from './requestContext';
 import { isAuthRequiredError, RpcConnectionClosedError } from './rpc';
 
 export const VENDOR = 'google-acp';
@@ -80,11 +81,26 @@ interface ActiveTurn {
 	startedAt: number;
 }
 
+/** The workspace a chat belongs to, which can differ from the one the window has open. */
+interface ChatContext {
+	/** The folders Copilot rendered into the chat, when it rendered any. */
+	readonly folders: readonly string[] | undefined;
+	/** Where the agent is rooted. */
+	readonly cwd: string;
+	/** The workspace guidance Copilot rendered into the system message of the request. */
+	readonly guidance: string | undefined;
+}
+
 interface ChatSession {
 	readonly acp: AgentSession;
 	readonly endpoint: McpServerEndpoint;
+	readonly context: ChatContext;
 	readonly history: string[];
 	model: string;
+	/** Every tool name this session has been offered, so a newly offered tool starts a session that can see it. */
+	readonly seenTools: Set<string>;
+	/** Whether the session was given the workspace prompt; a request that offers no tools gets none. */
+	readonly hasPrompt: boolean;
 	effort?: string;
 	turn?: ActiveTurn;
 	cachedReadTokens: number;
@@ -150,7 +166,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		private readonly output: vscode.LogOutputChannel,
 		private readonly state?: vscode.Memento,
 		/** Returns the text to append to the agent's system prompt for a chat that offers these tools. */
-		private readonly sessionPrompt?: (tools: readonly vscode.LanguageModelChatTool[]) => Promise<string | undefined>,
+		private readonly sessionPrompt?: (tools: readonly vscode.LanguageModelChatTool[], chatFolders?: readonly string[], guidance?: string) => Promise<string | undefined>,
 	) {
 		this.write = scopedLog(output, 'provider');
 		this.agentListener = this.agent.onDidChange(change => this.handleAgentChange(change));
@@ -275,8 +291,11 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 
 		const tools = options.tools ?? [];
-		const key = sessionKey(messages);
+		const key = sessionKey(messages, options);
+		const context = chatContextOf(messages);
 		const effort = effortOf(options);
+		const toolNames = tools.map(tool => tool.name);
+		this.log(`Request from Copilot: model ${model.id}, ${messages.length} message(s), ${tools.length} tool(s): ${toolNames.join(', ') || 'none'}`);
 		let session = this.sessions.get(key);
 		if (session) {
 			// Re-insert so the map stays ordered by recency of use.
@@ -286,27 +305,40 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 
 		if (session && session.model !== model.id) {
 			await this.abortTurn(session);
-			session = await this.switchModel(key, session, model, tools);
+			session = await this.switchModel(key, session, model, tools, context);
 		}
-		if (!session) {
-			session = await this.createChatSession(key, model, tools);
-		}
-		this.bridge.updateTools(session.endpoint.token, tools);
-		await this.applyEffort(session, effort);
-
 		const fingerprints = messages.map(fingerprint);
 
 		// Copilot ran the tools of the pending turn: hand the results back to the
-		// agent and keep streaming the same turn into this response.
-		if (session.turn && this.resolveToolResults(session.turn, messages)) {
+		// agent and keep streaming the same turn into this response. The tools of the
+		// session stay as they are until the turn ends, so a result is never dropped.
+		if (session && session.turn && this.resolveToolResults(session.turn, messages)) {
+			this.applyTools(session, tools);
+			await this.applyEffort(session, effort);
 			this.trackCancellation(session.turn, token);
 			await this.driveTurn(key, session, progress, token, fingerprints);
 			return;
 		}
-		if (session.turn) {
+		if (session?.turn) {
 			this.log(`The pending turn for ${key} was abandoned; cancelling it.`, 'warn');
 			await this.abortTurn(session);
 		}
+
+		if (session && tools.length > 0 && (!session.hasPrompt || offersNewTools(session.seenTools, tools) || guidanceDiffers(session.context.guidance, context.guidance))) {
+			// The chat was opened by a request that offered no tools, such as a title,
+			// and so got no workspace prompt; or Copilot now offers a tool this session
+			// never saw, or describes the chat differently. The agent takes its prompt and
+			// its tools when it opens a session, so the chat gets a new one; its messages
+			// are restored into it.
+			this.log(`Chat ${key} ${session.hasPrompt ? 'changed its tools or its guidance' : 'now offers tools'}; giving it a new session.`);
+			await this.destroySession(key);
+			session = undefined;
+		}
+		if (!session) {
+			session = await this.createChatSession(key, model, tools, context);
+		}
+		this.applyTools(session, tools);
+		await this.applyEffort(session, effort);
 
 		// A session that has seen nothing yet only gets the current turn, plus a
 		// transcript of what came before: the chat may predate this session (window
@@ -318,8 +350,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		if (session.history.length > fingerprints.length || diverged(session.history, fingerprints)) {
 			this.log(`Chat history changed for ${key}; starting a fresh ACP session.`);
 			await this.destroySession(key);
-			session = await this.createChatSession(key, model, tools);
-			this.bridge.updateTools(session.endpoint.token, tools);
+			session = await this.createChatSession(key, model, tools, context);
+			this.applyTools(session, tools);
 			await this.applyEffort(session, effort);
 			startIndex = lastUser;
 			restoreContext = true;
@@ -330,15 +362,24 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 
 		let blocks = toAcpContentBlocks(messages.slice(startIndex));
-		if (blocks.length === 0) {
-			blocks = toAcpContentBlocks(messages.slice(lastUser));
+		const preamble: AcpContentBlock[] = [];
+		if (restoreContext) {
+			// The context of the chat comes first, as it does in the prompt the host renders.
+			const chatContext = chatContextBlock(messages.slice(0, lastUser));
+			if (chatContext) {
+				this.log(`Forwarding ${chatContext.text.length} character(s) of context for the chat.`, 'debug');
+				preamble.push(chatContext);
+			}
 		}
 		if (restoreContext && lastUser > 0) {
 			const transcript = toTranscriptBlock(messages.slice(0, lastUser));
 			if (transcript) {
 				this.log(`Restoring ${lastUser} earlier message(s) into the new ACP session.`);
-				blocks = [transcript, ...blocks];
+				preamble.push(transcript);
 			}
+		}
+		if (preamble.length > 0) {
+			blocks = [...preamble, ...blocks];
 		}
 		if (blocks.length === 0) {
 			this.log('The request contained no user text to forward to the agent.', 'warn');
@@ -431,12 +472,17 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		return this.warmSessionCreation;
 	}
 
-	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[]): Promise<ChatSession> {
+	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext): Promise<ChatSession> {
 		const endpoint = await this.bridge.registerSession(tools, (name, input, token) => this.executeTool(key, name, input, token));
 		try {
-			const systemPromptAppend = await this.buildSessionPrompt(tools);
+			// A request that offers no tools is Copilot's own, such as a chat title: the
+			// agent could not read a skill, an instruction file or a custom file without
+			// a tool, so the prompt would only be paid for in tokens.
+			const systemPromptAppend = tools.length === 0
+				? undefined
+				: await this.buildSessionPrompt(tools, context.folders, context.guidance);
 			const acp = await this.agent.createSession({
-				cwd: workspaceCwd(),
+				cwd: context.cwd,
 				mcpServers: [{
 					type: 'http',
 					name: 'vscode',
@@ -450,15 +496,18 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			const session: ChatSession = {
 				acp,
 				endpoint,
+				context,
 				history: [],
 				model: model.id,
+				seenTools: new Set(tools.map(tool => tool.name)),
+				hasPrompt: tools.length > 0,
 				cachedReadTokens: 0,
 				cachedWriteTokens: 0,
 				inputTokens: 0,
 				outputTokens: 0,
 			};
 			this.sessions.set(key, session);
-			this.log(`Created chat session for ${key} using ${model.id}`);
+			this.log(`Created chat session for ${key} using ${model.id} in ${context.cwd}${context.folders ? '' : ' (the window\'s folder; the request named none)'}`);
 			this.evictIdleSessions(key);
 			return session;
 		} catch (error) {
@@ -468,9 +517,9 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	}
 
 	/** A chat still starts when the skills or instruction files cannot be read; it just has no extras. */
-	private async buildSessionPrompt(tools: readonly vscode.LanguageModelChatTool[]): Promise<string | undefined> {
+	private async buildSessionPrompt(tools: readonly vscode.LanguageModelChatTool[], chatFolders: readonly string[] | undefined, guidance: string | undefined): Promise<string | undefined> {
 		try {
-			return await this.sessionPrompt?.(tools);
+			return await this.sessionPrompt?.(tools, chatFolders, guidance);
 		} catch (error) {
 			this.log(`Could not build the session prompt: ${describe(error)}`, 'warn');
 			return undefined;
@@ -486,6 +535,20 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 				this.log(`Closing the least recently used chat session ${key}.`, 'debug');
 				void this.destroySession(key);
 			}
+		}
+	}
+
+	/** Applies the tool set of a request to the session, which tells the agent when it changed. */
+	private applyTools(session: ChatSession, tools: readonly vscode.LanguageModelChatTool[]): void {
+		// A request that offers no tools is Copilot's own, such as a chat title: it says
+		// nothing about what this chat may use, and emptying the list would only make the
+		// agent drop tools it still has.
+		if (tools.length === 0) {
+			return;
+		}
+		this.bridge.updateTools(session.endpoint.token, tools);
+		for (const tool of tools) {
+			session.seenTools.add(tool.name);
 		}
 	}
 
@@ -908,7 +971,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		return new Promise<void>(resolve => turn.waiters.push(resolve));
 	}
 
-	private async switchModel(key: string, session: ChatSession, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[]): Promise<ChatSession> {
+	private async switchModel(key: string, session: ChatSession, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext): Promise<ChatSession> {
 		const modelOption = findModelOption(session.acp.configOptions);
 		if (modelOption) {
 			try {
@@ -925,7 +988,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 
 		await this.destroySession(key);
-		return this.createChatSession(key, model, tools);
+		return this.createChatSession(key, model, tools, context);
 	}
 
 	private async destroySession(key: string): Promise<void> {
@@ -942,6 +1005,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 		this.bridge.unregisterSession(session.endpoint.token);
 		await this.agent.closeSession(session.acp.sessionId);
+		this.log(`Closed the chat session for ${key} (${session.acp.sessionId}).`);
 	}
 
 	private handleAgentChange(change: AgentChange): void {
@@ -991,16 +1055,55 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 }
 
 /**
+ * Whether Copilot now offers a tool the agent has never been able to call. A
+ * session lists its tools when it opens, so a tool offered later can only be
+ * reached by opening a session that knows about it.
+ */
+export function offersNewTools(seen: ReadonlySet<string>, tools: readonly vscode.LanguageModelChatTool[]): boolean {
+	return tools.some(tool => !seen.has(tool.name));
+}
+
+/**
+ * Whether the guidance describing the chat differs from the one the session was
+ * given. Copilot renders its system prompt again for every request, and the
+ * agent keeps the one it was opened with: a chat that switches between asking
+ * and working, or turns autopilot on, would otherwise keep the old rules.
+ *
+ * Case and spacing are folded, because a host may write the same prompt with a
+ * different drive-letter casing and that is no change to what it says.
+ */
+export function guidanceDiffers(before: string | undefined, after: string | undefined): boolean {
+	return squashGuidance(before) !== squashGuidance(after);
+}
+
+function squashGuidance(text: string | undefined): string {
+	return (text ?? '').replace(/\s+/g, ' ').trim().replace(/\\/g, '/').toLowerCase();
+}
+
+/**
  * Copilot gives a provider no identifier for the chat a request belongs to, so
  * a chat is identified by the workspace plus its opening messages, which never
  * change as the conversation grows. Chats running at once then keep separate
  * ACP sessions and cannot receive each other's output or tool results.
+ *
+ * The workspace is the one Copilot rendered into the chat, since a window can
+ * show chats of other folders. Copilot's conversation id keeps chats that open
+ * with the same words apart; sub-agents of a chat share it but open
+ * differently, so they still get sessions of their own.
  */
-export function sessionKey(messages: readonly vscode.LanguageModelChatRequestMessage[]): string {
-	const folder = vscode.workspace.workspaceFolders?.[0];
-	const workspace = folder ? folder.uri.toString() : 'no-workspace';
-	const opening = messages.slice(0, 2).map(fingerprint).join('\n');
-	return `${workspace}#${createHash('sha1').update(opening).digest('hex').slice(0, 12)}`;
+export function sessionKey(messages: readonly vscode.LanguageModelChatRequestMessage[], options?: vscode.ProvideLanguageModelChatResponseOptions): string {
+	const windowFolder = vscode.workspace.workspaceFolders?.[0];
+	const workspace = workspaceFoldersOf(messages)?.[0] ?? (windowFolder ? windowFolder.uri.toString() : 'no-workspace');
+	const conversation = conversationIdOf(options) ?? '';
+	// The system prompt is left out: the host renders it afresh for each request.
+	const opening = messages.filter(message => !isSystemMessage(message)).slice(0, 2).map(fingerprint).join('\n');
+	return `${workspace}#${conversation}#${createHash('sha1').update(opening).digest('hex').slice(0, 12)}`;
+}
+
+/** The workspace of the chat a request belongs to. */
+function chatContextOf(messages: readonly vscode.LanguageModelChatRequestMessage[]): ChatContext {
+	const folders = workspaceFoldersOf(messages);
+	return { folders, cwd: resolveCwd(folders, workspaceCwd()), guidance: systemGuidanceOf(messages) };
 }
 
 /** Reports a thinking chunk when the running VS Code exposes thinking parts. */

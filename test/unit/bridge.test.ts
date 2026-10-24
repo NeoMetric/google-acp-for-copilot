@@ -17,10 +17,12 @@ describe('McpBridge', () => {
 	let bridge: McpBridge;
 	let endpoint: McpServerEndpoint;
 	const execute = vi.fn<McpToolExecutor>();
+	const logs: string[] = [];
 
 	beforeEach(async () => {
 		execute.mockReset();
-		bridge = new McpBridge(() => { });
+		logs.length = 0;
+		bridge = new McpBridge(message => logs.push(message));
 		endpoint = await bridge.registerSession(tools, execute);
 	});
 
@@ -65,17 +67,28 @@ describe('McpBridge', () => {
 		expect(foreignHost).toBe(403);
 	});
 
-	it('only accepts POST', async () => {
+	it('keeps the two methods and refuses the rest', async () => {
+		const put = await fetch(endpoint.url, { method: 'PUT', headers: { authorization: `Bearer ${endpoint.token}` } });
+		const del = await fetch(endpoint.url, { method: 'DELETE', headers: { authorization: `Bearer ${endpoint.token}` } });
+
+		expect(put.status).toBe(405);
+		expect(del.status).toBe(405);
+		expect(put.headers.get('allow')).toBe('GET, POST');
+	});
+
+	it('opens a notification stream on GET, which the agent reads tool changes from', async () => {
 		const response = await fetch(endpoint.url, { headers: { authorization: `Bearer ${endpoint.token}` } });
 
-		expect(response.status).toBe(405);
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-type')).toContain('text/event-stream');
+		await response.body?.cancel();
 	});
 
 	it('answers initialize with a known protocol version and tool capability', async () => {
 		const body = await rpc('initialize', { protocolVersion: '2025-03-26' });
 
 		expect(body.result.protocolVersion).toBe('2025-03-26');
-		expect(body.result.capabilities).toEqual({ tools: { listChanged: false } });
+		expect(body.result.capabilities).toEqual({ tools: { listChanged: true } });
 		expect((await rpc('initialize', { protocolVersion: '1999-01-01' })).result.protocolVersion).toBe('2025-06-18');
 	});
 
@@ -89,6 +102,53 @@ describe('McpBridge', () => {
 		bridge.updateTools(endpoint.token, []);
 
 		expect((await rpc('tools/list')).result.tools).toEqual([]);
+	});
+
+	it('tells an open notification stream that the tool list changed, so a disabled tool stops being offered', async () => {
+		const response = await fetch(endpoint.url, { headers: { authorization: `Bearer ${endpoint.token}` } });
+		expect(response.status).toBe(200);
+		expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+		const reader = response.body!.getReader();
+		const decoder = new TextDecoder();
+		let seen = '';
+		const readUntil = async (needle: string) => {
+			while (!seen.includes(needle)) {
+				const { value, done } = await reader.read();
+				if (done) {
+					break;
+				}
+				seen += decoder.decode(value, { stream: true });
+			}
+			return seen;
+		};
+
+		await readUntil('waiting for notifications');
+		bridge.updateTools(endpoint.token, []);
+		const seenAfter = await readUntil('notifications/tools/list_changed');
+
+		expect(seenAfter).toContain('event: message');
+		expect(seenAfter).toContain('data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}');
+
+		await reader.cancel();
+	});
+
+	it('stays quiet when the same tools arrive again in another order', () => {
+		const two = [{ name: 'a', description: '' }, { name: 'b', description: '' }] as unknown as vscode.LanguageModelChatTool[];
+		bridge.updateTools(endpoint.token, two);
+		bridge.updateTools(endpoint.token, [...two].reverse());
+
+		expect(logs.filter(line => line.includes('Tool set of an agent session changed'))).toHaveLength(1);
+	});
+
+	it('drops the notification stream when its session goes away', async () => {
+		const response = await fetch(endpoint.url, { headers: { authorization: `Bearer ${endpoint.token}` } });
+		const reader = response.body!.getReader();
+		await reader.read();
+
+		bridge.unregisterSession(endpoint.token);
+
+		await expect(reader.read()).resolves.toMatchObject({ done: true });
 	});
 
 	it('forwards a tool call to the executor and returns its content', async () => {

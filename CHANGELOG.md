@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- The reminders Copilot repeats beside each request now reach the agent. They carry the editing contract for the tools it calls through Copilot: `...existing code...` for `insert_edit_into_file`, the surrounding lines to quote for `replace_string_in_file`, and the preference for the multi-replace tool.
+- The context Copilot builds for the whole chat now reaches the agent too, once, when a session starts: the operating system, the layout of the workspace, the user preferences and the memory the host had loaded. It was dropped before, so the agent had to rediscover the workspace with tools.
+- Each request keeps the tools the user pointed at with `#tool`, the notebook formatting instructions, and the attachments — in the order Copilot writes them.
+- The guidance Copilot writes into its system prompt now reaches the agent: the working directory, the repository rules, the tool directory and the user's preferences. It is appended ahead of the skills and instruction files, and every system message contributes instead of only the first. The identity preamble and Copilot's own memory rules are dropped, since the agent has a prompt and a memory section of its own.
+- Skills, instruction files and custom-file pointers that Copilot already writes into its own system prompt are no longer added a second time. A workspace with `copilot-instructions.md` and a large skill folder was paying for every one of them twice.
+- The memory section names the file reader the chat actually offers — `read_file` through the MCP bridge when Copilot offers it, `view` otherwise — instead of always `view`.
+- A chat session is rebuilt when Copilot starts offering a tool the session never saw, such as `task_complete` when autopilot is switched on, or when Copilot describes the chat differently, such as switching between asking and working. The conversation is restored into the new session. A session opened by a request that offered no tools, such as a chat title, gets the workspace prompt on the first request that offers them.
+- A request that offers no tools no longer empties the chat's tool list or pays for a workspace prompt the agent could not act on, since it has no tool to read a file with.
+- A request that carries no text fails with a clear error instead of sending an earlier message to the agent a second time.
+- A tool the user disables now stops being offered to the agent, and one they enable starts being callable, without the chat starting over. The bridge announces `notifications/tools/list_changed` over an MCP notification stream and answers `initialize` with that capability.
+- The output channel now names every request: the model, the message count, and the full list of tools sent with it. Closing a chat session is logged too.
+- A system prompt the host re-renders between requests, such as one that spells a drive letter in another case, no longer looks like a rewritten history and no longer restarts the session.
+
 ## 0.1.3 - 2026-10-24
 
 - Discovers Copilot skills (`SKILL.md`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) from `.copilot/`, `.claude/`, `.agents/`, and `.github/` directories as well as configured skill/prompt locations, and includes them in the agent's system prompt.
