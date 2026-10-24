@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The agent is now told, for every tool the chat offers, which arguments that tool's schema requires. Antigravity reaches the chat's tools through a generic wrapper and otherwise skips arguments such as a terminal command's `description`, which leaves the command as the title of the call. The list is read from the schema Copilot publishes, so a renamed or added argument needs no code change.
 - The reminders Copilot repeats beside each request now reach the agent. They carry the editing contract for the tools it calls through Copilot: `...existing code...` for `insert_edit_into_file`, the surrounding lines to quote for `replace_string_in_file`, and the preference for the multi-replace tool.
 - The context Copilot builds for the whole chat now reaches the agent too, once, when a session starts: the operating system, the layout of the workspace, the user preferences and the memory the host had loaded. It was dropped before, so the agent had to rediscover the workspace with tools.
 - Each request keeps the tools the user pointed at with `#tool`, the notebook formatting instructions, and the attachments — in the order Copilot writes them.

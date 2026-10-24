@@ -20,6 +20,36 @@ describe('buildSystemPromptAppend', () => {
 		expect(buildSystemPromptAppend({ skills: [], instructions: [], toolNames: ['run_in_terminal'] })).toBeUndefined();
 	});
 
+	it('includes the positive rule to only call call_mcp_tool', () => {
+		const text = buildSystemPromptAppend({ skills: [skill('review')], instructions: [], toolNames: allTools })!;
+		expect(text).toContain('Only call `call_mcp_tool` for tool execution.');
+	});
+
+	it('lists the arguments each tool requires, read from its schema', () => {
+		const text = buildSystemPromptAppend({
+			skills: [],
+			instructions: [],
+			toolNames: ['powershell', 'view'],
+			toolArguments: [
+				{ name: 'powershell', required: ['command', 'description'] },
+				{ name: 'view', required: [] },
+			],
+		})!;
+
+		expect(text).toContain('## Tool arguments');
+		expect(text).toContain('- powershell: command, description');
+		expect(text).not.toContain('- view:');
+	});
+
+	it('adds no tool arguments section when no tool requires an argument', () => {
+		expect(buildSystemPromptAppend({
+			skills: [],
+			instructions: [],
+			toolNames: ['view'],
+			toolArguments: [{ name: 'view', required: [] }],
+		})).toBeUndefined();
+	});
+
 	it('forwards the guidance the host rendered for the chat, before what the folders carry', () => {
 		const text = buildSystemPromptAppend({
 			skills: [skill('review')],

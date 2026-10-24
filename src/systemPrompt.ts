@@ -13,6 +13,8 @@ import { discoverSkills, readHead, skillRoots, type Skill } from './skills';
 /** Room for the skills list, the same as Copilot's own `chat.copilot.skillCharBudget` default. */
 export const SKILLS_CHAR_BUDGET = 30_000;
 export const INSTRUCTIONS_CHAR_BUDGET = 20_000;
+/** Room for the required arguments of the tools the chat offers. */
+export const TOOL_ARGUMENTS_CHAR_BUDGET = 4_000;
 
 /** Instruction files are read from the top; anything past this is cut anyway. */
 const INSTRUCTIONS_READ_BYTES = 64 * 1024;
@@ -33,11 +35,19 @@ export interface SessionPromptInput {
 	readonly customFiles?: readonly CustomFile[];
 	/** The names of the tools Copilot offers the chat, as Copilot calls them. */
 	readonly toolNames: readonly string[];
+	/** The required arguments of each tool, read from the schema published for it. */
+	readonly toolArguments?: readonly ToolArguments[];
 	/** The workspace guidance Copilot rendered into its system prompt for this chat. */
 	readonly guidance?: string;
 }
 
-const INTRO = `You are running inside Visual Studio Code, as the model behind a chat in GitHub Copilot Chat. The tools of the MCP server named \`vscode\` are VS Code's own and act on the user's workspace.`;
+/** One tool and the arguments its schema marks as required. */
+export interface ToolArguments {
+	readonly name: string;
+	readonly required: readonly string[];
+}
+
+const INTRO = `You are running inside Visual Studio Code, as the model behind a chat in GitHub Copilot Chat. The tools of the MCP server named \`vscode\` are VS Code's own and act on the user's workspace. Only call \`call_mcp_tool\` for tool execution.`;
 
 const SKILLS_HEADER = `## Skills
 
@@ -66,7 +76,8 @@ The \`memory\` tool of the \`vscode\` MCP server keeps notes that last: \`/memor
 /**
  * The text appended to the agent's own system prompt for one chat. Skills and
  * instructions come from files on disk and do not depend on which tools the
- * chat offers; the memory section names a tool, so it appears only when the
+ * chat offers; the tool arguments come from the schemas Copilot publishes for
+ * those tools, and the memory section names a tool, so it appears only when the
  * chat has that tool. The text depends on
  * nothing that changes from turn to turn, so it does not break prompt caching.
  */
@@ -81,6 +92,10 @@ export function buildSystemPromptAppend(input: SessionPromptInput): string | und
 	const instructions = instructionsSection(input.instructions, carried);
 	if (instructions) {
 		sections.push(instructions);
+	}
+	const toolArguments = toolArgumentsSection(input.toolArguments);
+	if (toolArguments) {
+		sections.push(toolArguments);
 	}
 	const skills = skillsSection(input.skills, carried);
 	if (skills) {
@@ -158,6 +173,38 @@ function skillsSection(skills: readonly Skill[], carried: GuidanceScan | undefin
 	return `${SKILLS_HEADER}\n${lines.join('\n')}`;
 }
 
+const TOOL_ARGUMENTS_HEADER = `## Tool arguments
+
+Copilot runs a tool with whatever arguments the reply carries and does not check them against the tool's schema. Pass every argument the schema marks as required. The required arguments of the tools the chat offers are:
+
+`;
+
+function toolArgumentsSection(tools: readonly ToolArguments[] | undefined): string | undefined {
+	const lines: string[] = [];
+	let omitted = 0;
+	let remaining = TOOL_ARGUMENTS_CHAR_BUDGET;
+
+	for (const tool of tools ?? []) {
+		if (tool.required.length === 0) {
+			continue;
+		}
+		const line = `- ${tool.name}: ${tool.required.join(', ')}`;
+		if (line.length + 1 > remaining) {
+			omitted++;
+			continue;
+		}
+		lines.push(line);
+		remaining -= line.length + 1;
+	}
+	if (lines.length === 0) {
+		return undefined;
+	}
+	if (omitted > 0) {
+		lines.push(`- … ${omitted} more tool${omitted === 1 ? '' : 's'} not listed`);
+	}
+	return `${TOOL_ARGUMENTS_HEADER}\n${lines.join('\n')}`;
+}
+
 const CUSTOM_SECTIONS: ReadonlyArray<{ kind: CustomKind; title: string; intro: string }> = [
 	{ kind: 'instructions', title: 'Instruction files for specific files', intro: 'Before you work on files that match a pattern below, read that instruction file and follow it. A file with no pattern applies when its description fits the task.' },
 	{ kind: 'agent', title: 'Custom agents', intro: 'When the user asks for one of these by name, read its file and follow it for that task.' },
@@ -211,6 +258,12 @@ function instructionsSection(instructions: readonly Instructions[], carried: Gui
 	return parts.length === 0 ? undefined : parts.join('\n\n');
 }
 
+/** The arguments a tool's JSON schema marks as required. */
+function requiredArguments(inputSchema: object | undefined): string[] {
+	const required = (inputSchema as { required?: unknown } | undefined)?.required;
+	return Array.isArray(required) ? required.filter((name): name is string => typeof name === 'string') : [];
+}
+
 /** The instruction files the workspace folders carry, which Copilot would have put in its own prompt. */
 export async function loadInstructions(workspaceFolders: readonly string[]): Promise<Instructions[]> {
 	const found: Instructions[] = [];
@@ -255,8 +308,9 @@ export function createSessionPrompt(log: Log, profilePromptsDir?: string): (tool
 			},
 		});
 		const instructions = [...await loadInstructions(folders), ...custom.alwaysOn];
+		const toolArguments = tools.map(tool => ({ name: tool.name, required: requiredArguments(tool.inputSchema) }));
 
-		const append = buildSystemPromptAppend({ skills, instructions, customFiles: custom.files, toolNames: tools.map(tool => tool.name), guidance });
+		const append = buildSystemPromptAppend({ skills, instructions, customFiles: custom.files, toolNames: tools.map(tool => tool.name), toolArguments, guidance });
 		const toolNames = tools.map(tool => tool.name);
 		const hasRead = toolNames.includes('read_file');
 		log(`Session prompt: ${skills.length} skill(s), ${instructions.length} instruction file(s), ${custom.files.length} on-demand file(s) found; ${guidance?.length ?? 0} character(s) of host guidance, ${append?.length ?? 0} appended; workspace trusted: ${vscode.workspace.isTrusted}, folders: ${folders.join(', ') || 'none'}; ${toolNames.length} tool(s), read_file: ${hasRead}, memory: ${toolNames.includes('memory')}${hasRead ? '' : ` (tools: ${toolNames.join(', ') || 'none'})`}.`);
