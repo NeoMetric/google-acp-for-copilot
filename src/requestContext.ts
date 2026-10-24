@@ -124,12 +124,6 @@ export function workspaceFoldersOf(messages: readonly vscode.LanguageModelChatRe
  * otherwise never see.
  */
 const FIRST_SECTION = /^[ \t]*<[A-Za-z][\w-]*[\s>]/m;
-/**
- * The host's own memory rules. They describe the same memory tool this
- * extension writes about, and the section below covers it in the terms of this
- * agent, so keeping both would only repeat it.
- */
-const MEMORY_INSTRUCTIONS = /^[ \t]*<memoryInstructions>[\s\S]*?<\/memoryInstructions>[ \t]*$/gm;
 
 /**
  * The guidance the host writes in the system message of the request, which the
@@ -139,9 +133,11 @@ const MEMORY_INSTRUCTIONS = /^[ \t]*<memoryInstructions>[\s\S]*?<\/memoryInstruc
  * conversation.
  *
  * The identity preamble is left out, since the agent has a prompt of its own,
- * and so are the host's memory rules, which the appended memory section says
- * again. Text the user or the agent wrote is never read: only a system message
- * counts. A host that sends more than one system message contributes each.
+ * and everything else the host wrote is kept as it stands: its skill and agent
+ * lists, its index of instruction files and its rules for the memory tool all
+ * reach the agent in the host's own words. Text the user or the agent wrote is
+ * never read: only a system message counts. A host that sends more than one
+ * system message contributes each.
  */
 export function systemGuidanceOf(messages: readonly vscode.LanguageModelChatRequestMessage[]): string | undefined {
 	const sections: string[] = [];
@@ -155,9 +151,7 @@ export function systemGuidanceOf(messages: readonly vscode.LanguageModelChatRequ
 		if (start === undefined) {
 			continue;
 		}
-		const section = text.slice(start)
-			.replace(MEMORY_INSTRUCTIONS, '')
-			.trim();
+		const section = text.slice(start).trim();
 		if (section.length > 0) {
 			sections.push(section);
 		}

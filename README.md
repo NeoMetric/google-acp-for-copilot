@@ -64,7 +64,9 @@ The **Google ACP** output channel names every request at the default Info level 
 
 ## Skills and customizations
 
-Skills (folders with a `SKILL.md` in `.copilot/skills`, `.claude/skills`, `.agents/skills`, `.github/skills`, or directories configured in `chat.agentSkillsLocations`), workspace instructions (`.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `.instructions.md`), custom agents (`.agent.md`), and prompt files (`.prompt.md`) are automatically discovered and included in the session's system prompt so Google Antigravity can use them. Whatever Copilot already writes into its own system prompt is left out, so nothing is paid for twice. The memory section names the file reader the chat actually offers.
+Skills, custom agents, instruction files and memory stay Copilot's own. The system prompt Copilot renders for the chat reaches the agent untouched, including its skill list, its agent list, the file paths of the instruction files and its rules for the `memory` tool. The extension reads none of them, inlines no instruction text and writes no memory rules of its own.
+
+Only what Copilot does not list is pointed out: a `*.instructions.md` or `*.prompt.md` file, from `~/.copilot`, the workspace or the folders named by `chat.instructionsFilesLocations` and `chat.promptFilesLocations`, when Copilot's own index does not already name it. An open chat keeps the prompt it started with; new chats, or **Google ACP: Restart Agent**, pick up changes.
 
 ## What is not included
 

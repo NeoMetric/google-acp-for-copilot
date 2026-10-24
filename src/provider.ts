@@ -492,8 +492,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		const endpoint = await this.bridge.registerSession(tools, (name, input, token) => this.executeTool(key, name, input, token));
 		try {
 			// A request that offers no tools is Copilot's own, such as a chat title: the
-			// agent could not read a skill, an instruction file or a custom file without
-			// a tool, so the prompt would only be paid for in tokens.
+			// agent could not read a customization file without a tool, so the prompt
+			// would only be paid for in tokens.
 			const systemPromptAppend = tools.length === 0
 				? undefined
 				: await this.buildSessionPrompt(tools, context.folders, context.guidance);
@@ -532,7 +532,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 	}
 
-	/** A chat still starts when the skills or instruction files cannot be read; it just has no extras. */
+	/** A chat still starts when the customization files cannot be read; it just has no extras. */
 	private async buildSessionPrompt(tools: readonly vscode.LanguageModelChatTool[], chatFolders: readonly string[] | undefined, guidance: string | undefined): Promise<string | undefined> {
 		try {
 			return await this.sessionPrompt?.(tools, chatFolders, guidance);

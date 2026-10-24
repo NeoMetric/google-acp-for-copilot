@@ -231,7 +231,7 @@ describe('systemGuidanceOf', () => {
 			.toContain('<view>Read.</view>');
 	});
 
-	it('drops the memory rules of the host, which say memory is loaded when none of it is', () => {
+	it('keeps the memory rules of the host as they stand, since the host owns memory', () => {
 		const guidance = systemGuidanceOf([system([
 			'<instructions>Work carefully.</instructions>',
 			'<memoryInstructions>',
@@ -242,7 +242,8 @@ describe('systemGuidanceOf', () => {
 
 		expect(guidance).toContain('Work carefully.');
 		expect(guidance).toContain('Be brief.');
-		expect(guidance).not.toContain('loaded into your context');
+		expect(guidance).toContain('<memoryInstructions>');
+		expect(guidance).toContain('loaded into your context');
 	});
 
 	it('is undefined when there is nothing to forward', () => {
@@ -260,8 +261,9 @@ describe('systemGuidanceOf', () => {
 		expect(guidance).toBe('<instructions>First.</instructions>\n\n<toolUseInstructions>Second.</toolUseInstructions>');
 	});
 
-	it('is undefined when a system message holds nothing but the memory rules', () => {
-		expect(systemGuidanceOf([system('<memoryInstructions>Memory is loaded for you.</memoryInstructions>')])).toBeUndefined();
+	it('forwards a system message that holds only the memory rules', () => {
+		expect(systemGuidanceOf([system('<memoryInstructions>Memory is loaded for you.</memoryInstructions>')]))
+			.toBe('<memoryInstructions>Memory is loaded for you.</memoryInstructions>');
 	});
 
 	it('ignores a system prompt the user or the assistant quoted', () => {
