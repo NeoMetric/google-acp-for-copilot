@@ -12,6 +12,7 @@ import { scopedLog, type Log, type LogLevel } from './logging';
 import { acpModelValue, effortLevelsOf, effortOf, findEffortOption, findModelOption, flattenChoices, toModelVariants } from './models';
 import { conversationIdOf, resolveCwd, systemGuidanceOf, workspaceFoldersOf } from './requestContext';
 import { isAuthRequiredError, RpcConnectionClosedError } from './rpc';
+import { hashAll, isPrefixOf, mismatchOf, SavedSessionStore, shortHash, toolsHashOf, type ReuseCheck, type SavedSession } from './sessionStore';
 
 export const VENDOR = 'google-acp';
 
@@ -116,6 +117,12 @@ interface ChatSession {
 	readonly hasPrompt: boolean;
 	/** Hash of the user and mode instructions the agent was last given, so each change is sent once. */
 	instructionsHash?: string;
+	/** The tools, the guidance and the session prompt the session opened with; a cache hit needs all three unchanged. */
+	readonly toolsHash: string;
+	readonly guidanceHash: string;
+	readonly promptHash: string;
+	/** Set when the session continues a stored conversation. Its first turn logs whether the cache served it. */
+	reused?: { readonly how: 'resumed'; readonly from: string; logged: boolean };
 	/** When the chat last asked for something or finished a turn; a session idle for long enough is released. */
 	lastActive: number;
 	effort?: string;
@@ -124,6 +131,12 @@ interface ChatSession {
 	cachedWriteTokens: number;
 	inputTokens: number;
 	outputTokens: number;
+}
+
+/** A stored conversation that a request continues, with the messages it already holds. */
+interface Reuse {
+	readonly saved: SavedSession;
+	readonly history: readonly string[];
 }
 
 /**
@@ -165,6 +178,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	readonly onDidChangeCacheStats = this.cacheStatsEmitter.event;
 
 	private readonly sessions = new Map<string, ChatSession>();
+	private readonly saved: SavedSessionStore;
 	private readonly agentListener: vscode.Disposable;
 	private readonly write: Log;
 	private cachedModels: vscode.LanguageModelChatInformation[] | undefined;
@@ -188,6 +202,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		private readonly sessionPrompt?: (tools: readonly vscode.LanguageModelChatTool[], chatFolders?: readonly string[], guidance?: string) => Promise<string | undefined>,
 	) {
 		this.write = scopedLog(output, 'provider');
+		this.saved = new SavedSessionStore(state);
 		this.agentListener = this.agent.onDidChange(change => this.handleAgentChange(change));
 	}
 
@@ -328,6 +343,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			session = await this.switchModel(key, session, model, tools, context);
 		}
 		const fingerprints = messages.map(fingerprint);
+		const lastUser = lastUserMessageIndex(messages);
 
 		// Copilot ran the tools of the pending turn: hand the results back to the
 		// agent and keep streaming the same turn into this response. The tools of the
@@ -370,7 +386,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			session = undefined;
 		}
 		if (!session) {
-			session = await this.createChatSession(key, model, tools, context);
+			const reuse = tools.length > 0 ? this.findReusable(key, fingerprints, lastUser, tools, context) : undefined;
+			session = await this.createChatSession(key, model, tools, context, reuse);
 		}
 		this.applyTools(session, tools);
 		await this.applyEffort(session, effort);
@@ -378,7 +395,6 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		// A session that has seen nothing yet only gets the current turn, plus a
 		// transcript of what came before: the chat may predate this session (window
 		// reload, agent restart), and the agent has no other memory of it.
-		const lastUser = lastUserMessageIndex(messages);
 		let startIndex = session.history.length === 0 ? lastUser : session.history.length;
 		let restoreContext = session.history.length === 0;
 
@@ -588,7 +604,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		}
 	}
 
-	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext): Promise<ChatSession> {
+	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext, reuse?: Reuse): Promise<ChatSession> {
 		const endpoint = await this.bridge.registerSession(tools, (name, input, token) => this.executeTool(key, name, input, token));
 		try {
 			// A request that offers no tools is Copilot's own, such as a chat title: the
@@ -597,26 +613,49 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			const systemPromptAppend = tools.length === 0
 				? undefined
 				: await this.buildSessionPrompt(tools, context.folders, context.guidance);
-			const acp = await this.agent.createSession({
+			const options = {
 				cwd: context.cwd,
 				mcpServers: [{
-					type: 'http',
+					type: 'http' as const,
 					name: 'vscode',
 					url: endpoint.url,
 					headers: [{ name: 'Authorization', value: `Bearer ${endpoint.token}` }],
 				}],
 				model: acpModelValue(model.id),
 				systemPromptAppend,
-			});
+			};
+			const promptHash = shortHash(systemPromptAppend ?? '');
 
+			let acp: AgentSession | undefined;
+			let reused: ChatSession['reused'];
+			if (reuse) {
+				if (reuse.saved.promptHash !== promptHash) {
+					this.log(`[reuse] The session prompt differs from the saved one (${reuse.saved.promptHash} -> ${promptHash}); the first model call will show whether the cache still served it.`);
+				}
+				try {
+					acp = await this.agent.resumeSession(reuse.saved.sessionId, options);
+					reused = { how: 'resumed', from: reuse.saved.sessionId, logged: false };
+					this.log(`[reuse] Resumed ACP session ${acp.sessionId}; the first model call will show whether the cache served it.`);
+				} catch (error) {
+					this.log(`[reuse] Could not resume saved session ${reuse.saved.sessionId} (${describe(error)}); starting a new session instead.`, 'warn');
+					this.saved.forget(key);
+				}
+			}
+			acp ??= await this.agent.createSession(options);
+
+			const history = reuse && reused ? [...reuse.history] : [];
 			const session: ChatSession = {
 				acp,
 				endpoint,
 				context,
-				history: [],
+				history,
 				model: model.id,
 				seenTools: new Set(tools.map(tool => tool.name)),
 				hasPrompt: tools.length > 0,
+				toolsHash: toolsHashOf(tools.map(tool => tool.name)),
+				guidanceHash: guidanceHashOf(context.guidance),
+				promptHash,
+				reused,
 				lastActive: Date.now(),
 				cachedReadTokens: 0,
 				cachedWriteTokens: 0,
@@ -632,6 +671,51 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			this.bridge.unregisterSession(endpoint.token);
 			throw error;
 		}
+	}
+
+	/**
+	 * Looks for a stored conversation that the request continues: this chat's own
+	 * after a window reload, or an agent restart. Every step is logged under
+	 * "[reuse]" so a reload can be checked in the output.
+	 */
+	private findReusable(key: string, fingerprints: readonly string[], lastUser: number, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext): Reuse | undefined {
+		const check: ReuseCheck = { cwd: context.cwd, toolsHash: toolsHashOf(tools.map(tool => tool.name)), guidanceHash: guidanceHashOf(context.guidance) };
+		const incoming = hashAll(fingerprints);
+		const all = this.saved.all();
+		this.log(`[reuse] No live session for ${key}: ${fingerprints.length} message(s), last user message at ${lastUser}, ${all.length} saved session(s), tools ${check.toolsHash}, guidance ${check.guidanceHash}.`);
+
+		const own = all.find(entry => entry.key === key);
+		if (own) {
+			const reason = mismatchOf(own, check) ?? (isPrefixOf(own.history, incoming) ? undefined : `the chat no longer starts with the ${own.history.length} saved message(s)`);
+			if (!reason) {
+				this.log(`[reuse] Saved session ${own.sessionId} matches this chat (${own.history.length} message(s) already in it); resuming it.`);
+				return { saved: own, history: fingerprints.slice(0, own.history.length) };
+			}
+			this.log(`[reuse] Saved session ${own.sessionId} found under this key but not usable: ${reason}.`, 'warn');
+		} else {
+			this.log('[reuse] Nothing saved under this key.');
+		}
+
+		this.log('[reuse] Nothing to continue; starting a new session and restoring the chat as a transcript.');
+		return undefined;
+	}
+
+	/** Remembers where the conversation of a chat is stored, so a later window can continue it. */
+	private remember(key: string, session: ChatSession, fingerprints: readonly string[]): void {
+		if (!session.hasPrompt) {
+			return;
+		}
+		this.saved.save({
+			key,
+			sessionId: session.acp.sessionId,
+			cwd: session.context.cwd,
+			history: hashAll(fingerprints),
+			toolsHash: session.toolsHash,
+			guidanceHash: session.guidanceHash,
+			promptHash: session.promptHash,
+			savedAt: Date.now(),
+		});
+		this.log(`[reuse] Saved session ${session.acp.sessionId} for ${key}: ${fingerprints.length} message(s).`, 'debug');
 	}
 
 	/** A chat still starts when the customization files cannot be read; it just has no extras. */
@@ -819,6 +903,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 
 		session.history.length = 0;
 		session.history.push(...fingerprints);
+		this.remember(key, session, fingerprints);
 
 		this.reportUsage(turn);
 		this.recordSessionUsage(session, turn);
@@ -887,6 +972,12 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		session.cachedWriteTokens += usage.cachedWriteTokens;
 		session.inputTokens += usage.inputTokens;
 		session.outputTokens += usage.outputTokens;
+
+		if (session.reused && !session.reused.logged) {
+			session.reused.logged = true;
+			const prompt = usage.cachedReadTokens + usage.cachedWriteTokens + usage.inputTokens;
+			this.log(`[reuse] First turn after the session was resumed from ${session.reused.from}: ${usage.cachedReadTokens.toLocaleString()} of ${prompt.toLocaleString()} prompt token(s) came from the cache.`);
+		}
 
 		const totalPrompt = session.cachedReadTokens + session.cachedWriteTokens + session.inputTokens;
 		const hitRate = totalPrompt > 0 ? (session.cachedReadTokens / totalPrompt) * 100 : 0;
@@ -1198,6 +1289,10 @@ export function guidanceDiffers(before: string | undefined, after: string | unde
 
 function squashGuidance(text: string | undefined): string {
 	return (text ?? '').replace(/\s+/g, ' ').trim().replace(/\\/g, '/').toLowerCase();
+}
+
+function guidanceHashOf(guidance: string | undefined): string {
+	return shortHash(squashGuidance(guidance));
 }
 
 /**

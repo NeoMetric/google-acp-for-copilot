@@ -8,6 +8,7 @@ import type * as vscode from 'vscode';
 import { conversationIdOf, resolveCwd, systemGuidanceOf, workspaceFoldersOf } from '../../src/requestContext';
 import { sessionKey } from '../../src/provider';
 import { assistant, system, user } from './messages';
+import { buildSystemPromptAppend } from '../../src/systemPrompt';
 
 const options = (modelOptions?: Record<string, unknown>) => ({ modelOptions, tools: [], toolMode: 1 }) as unknown as vscode.ProvideLanguageModelChatResponseOptions;
 
@@ -215,13 +216,29 @@ describe('systemGuidanceOf', () => {
 		expect(guidance).toContain('Prefer the gh CLI.');
 	});
 
-	it('drops the identity preamble but keeps the directory of the host tools, which the agent is offered', () => {
+	it('drops the identity preamble but keeps the behaviour written beside it', () => {
 		const guidance = systemGuidanceOf([hostPrompt('<tool_preferences>\nPrefer the gh CLI.\n</tool_preferences>')]);
 
 		expect(guidance).not.toContain('Copilot SDK');
-		expect(guidance?.startsWith('<code_change_instructions>')).toBe(true);
+		expect(guidance).toContain('You help users with software engineering tasks.');
+		expect(guidance).toContain('<code_change_instructions>');
 		expect(guidance).toContain('Run commands.');
 		expect(guidance).toContain('Prefer the gh CLI.');
+	});
+
+	it('forwards the behaviour of a prompt that has no sections at all', () => {
+		const guidance = systemGuidanceOf([system([
+			'You are an AI assistant using Copilot SDK in VS Code. You help users with software engineering tasks.',
+			'Never ask questions via plain text output; use the ask_user tool.',
+		].join('\n'))]);
+
+		expect(guidance).toBe('You help users with software engineering tasks.\nNever ask questions via plain text output; use the ask_user tool.');
+	});
+
+	it('drops the cache markers Copilot writes for its own prompt', () => {
+		const guidance = systemGuidanceOf([system('<instructions>Work carefully.</instructions>\n[copilot_cache_control: { type: \'ephemeral\' }]')]);
+
+		expect(guidance).toBe('<instructions>Work carefully.</instructions>');
 	});
 
 	it('keeps the tool directory whether or not the host closes it', () => {
@@ -248,12 +265,12 @@ describe('systemGuidanceOf', () => {
 
 	it('is undefined when there is nothing to forward', () => {
 		expect(systemGuidanceOf([user('hi'), assistant('hello')])).toBeUndefined();
-		expect(systemGuidanceOf([system('You are a helpful assistant.')])).toBeUndefined();
+		expect(systemGuidanceOf([system('You are an expert AI programming assistant, working with a user in the VS Code editor.\nFollow Microsoft content policies.\nKeep your answers short and impersonal.')])).toBeUndefined();
 	});
 
-	it('joins every system message that carries a section', () => {
+	it('joins every system message that carries guidance', () => {
 		const guidance = systemGuidanceOf([
-			system('You are the host.\n<instructions>First.</instructions>'),
+			system('You are an expert AI programming assistant, working with a user in the VS Code editor.\n<instructions>First.</instructions>'),
 			user('hi'),
 			system('<toolUseInstructions>Second.</toolUseInstructions>'),
 		]);
@@ -287,9 +304,30 @@ describe('systemGuidanceOf', () => {
 		const guidance = systemGuidanceOf([system('<rules>\nFollow the user\'s requirements carefully & to the letter.\nKeep your answers short and impersonal.\nAvoid content that violates copyrights.\n</rules>')]);
 
 		expect(guidance).toContain('Follow the user\'s requirements carefully & to the letter.');
-		expect(guidance).toContain('Avoid content that violates copyrights.');
 		expect(guidance).not.toContain('impersonal');
+		expect(guidance).not.toContain('Avoid content that violates copyrights.');
 	});
+
+	it('leaves the content policy to the intro, which carries it once', () => {
+		const guidance = systemGuidanceOf([system([
+			'You are an expert AI programming assistant, working with a user in the VS Code editor.',
+			'Follow the user\'s requirements carefully & to the letter.',
+			'Follow Microsoft content policies.',
+			'Avoid content that violates copyrights.',
+			'If you are asked to generate content that is harmful, hateful, racist, sexist, lewd, or violent, only respond with "Sorry, I can\'t assist with that."',
+			'Keep your answers short and impersonal.',
+			'<instructions>Work carefully.</instructions>',
+		].join('\n'))]);
+		const append = buildSystemPromptAppend({ guidance })!;
+
+		expect(guidance).toContain('Follow the user\'s requirements carefully & to the letter.');
+		expect(guidance).toContain('<instructions>Work carefully.</instructions>');
+		expect(guidance).not.toContain('Follow Microsoft content policies');
+		expect(guidance).not.toContain('only respond with');
+		expect(append.match(/Follow Microsoft content policies/g)).toHaveLength(1);
+		expect(append.match(/only respond with "Sorry, I can't assist with that."/g)).toHaveLength(1);
+	});
+
 	it('ignores a system prompt the user or the assistant quoted', () => {
 		const quoted = '<environment_context>\n* Current working directory: /quoted\n</environment_context>';
 

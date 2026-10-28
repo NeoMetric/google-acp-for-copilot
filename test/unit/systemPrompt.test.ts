@@ -7,11 +7,64 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { customInstructionsBlock, toAcpContentBlocks } from '../../src/convert';
 import { discoverCustomizations } from '../../src/customizations';
+import { guidanceDiffers } from '../../src/provider';
+import { systemGuidanceOf } from '../../src/requestContext';
+import { assistant, system, user } from './messages';
 import { buildSystemPromptAppend, CUSTOM_FILES_CHAR_BUDGET } from '../../src/systemPrompt';
 
 const file = (kind: 'instructions' | 'prompt', name: string, extra: { applyTo?: string; description?: string } = {}) =>
 	({ kind, name, description: extra.description ?? '', file: `/c/${name}`, applyTo: extra.applyTo });
+
+describe('prompt stability and duplication', () => {
+	const hostSystem = (mode: string) => system(`You are an expert AI programming assistant, working with a user in the VS Code editor.\nKeep your answers short and impersonal.\n<environment_context>\n* Current working directory: c:\\repo\n</environment_context>\n<rules>${mode}</rules>`);
+	const instructions = 'When generating code, please follow these user provided coding instructions.\n<instructions>\nUse tabs.\n</instructions>';
+
+	/** What the agent gets as the append for the chat that a request opens, and the per-turn text it is sent. */
+	const turn = (messages: ReturnType<typeof user>[]) => ({
+		append: buildSystemPromptAppend({ guidance: systemGuidanceOf(messages), customFiles: [file('instructions', 'ts', { applyTo: '**/*.ts' })] }),
+		guidance: systemGuidanceOf(messages),
+		blocks: toAcpContentBlocks(messages),
+		instructions: customInstructionsBlock(messages)?.text,
+	});
+
+	it('keeps the appended prompt and the guidance byte-identical across consecutive turns', () => {
+		const first = [hostSystem('Be careful.'), user(`${instructions}\n<context>10:00</context><userRequest>one</userRequest>`)];
+		const second = [hostSystem('Be careful.'), user(`${instructions}\n<context>10:05</context><userRequest>one</userRequest>`), assistant('done'), user(`${instructions}\n<context>10:06</context><userRequest>two</userRequest>`)];
+		const [a, b] = [turn(first), turn(second)];
+
+		expect(b.append).toBe(a.append);
+		expect(Buffer.from(b.append!).equals(Buffer.from(a.append!))).toBe(true);
+		expect(guidanceDiffers(a.guidance, b.guidance)).toBe(false);
+		expect(b.instructions).toBe(a.instructions);
+	});
+
+	it('keeps per-turn state out of the appended prompt', () => {
+		const { append } = turn([hostSystem('Be careful.'), user('<context>It is 10:00.</context><editorContext>open.ts</editorContext><userRequest>go</userRequest>')]);
+
+		expect(append).not.toContain('10:00');
+		expect(append).not.toContain('open.ts');
+		expect(append).not.toContain('userRequest');
+	});
+
+	it('sends the identity-free introduction, the guidance and every instruction exactly once', () => {
+		const messages = [hostSystem('Be careful.'), user(`${instructions}\n<userRequest>go</userRequest>`)];
+		const { append, blocks, instructions: custom } = turn(messages);
+		const everything = [append, ...blocks.map(block => (block.type === 'text' ? block.text : '')), custom].join('\n');
+
+		expect(everything.match(/Follow Microsoft content policies\./g)).toHaveLength(1);
+		expect(everything.match(/Current working directory: c:/g)).toHaveLength(1);
+		expect(everything.match(/Use tabs\./g)).toHaveLength(1);
+		expect(everything).not.toContain('impersonal');
+	});
+
+	it('lists the instruction files in a fixed order', () => {
+		const files = [file('instructions', 'a', { applyTo: '*.a' }), file('instructions', 'b', { applyTo: '*.b' }), file('prompt', 'p')];
+
+		expect(buildSystemPromptAppend({ customFiles: files, guidance: 'g' })).toBe(buildSystemPromptAppend({ customFiles: [...files], guidance: 'g' }));
+	});
+});
 
 describe('buildSystemPromptAppend', () => {
 	it('is undefined when there is nothing to add', () => {
@@ -22,7 +75,14 @@ describe('buildSystemPromptAppend', () => {
 	it('keeps the positive rule to only call call_mcp_tool', () => {
 		const text = buildSystemPromptAppend({ guidance: '<environment_context>Go.</environment_context>' })!;
 
-		expect(text).toContain('Only call `call_mcp_tool` for tool execution.');
+		expect(text).toContain('reach them only through `call_mcp_tool`');
+	});
+
+	it("tells the agent that a note on a tool result is the user's own message", () => {
+		const text = buildSystemPromptAppend({ guidance: '<environment_context>Go.</environment_context>' })!;
+
+		expect(text).toContain('the user sent a new message while the tool ran');
+		expect(text).toContain('treat them as their newest message');
 	});
 
 	it('lists the arguments each tool requires, read from its schema', () => {

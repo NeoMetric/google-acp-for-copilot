@@ -383,22 +383,12 @@ export class AgentClient implements vscode.Disposable {
 	async createSession(options: CreateSessionOptions): Promise<AgentSession> {
 		const rpc = await this.ensureStarted();
 
-		const base = { cwd: options.cwd, mcpServers: options.mcpServers };
-		const withoutOwnTools = !this.useBuiltInTools;
-		// TOOLS_INSTRUCTION is temporarily disabled (see the note at its definition).
-		const append = [/* withoutOwnTools ? TOOLS_INSTRUCTION : undefined, */ options.systemPromptAppend].filter(part => part).join('\n\n');
-		const antigravity = {
-			...(withoutOwnTools ? { disabledTools: DISABLED_BUILTIN_TOOLS } : {}),
-			...(append ? { systemPrompt: { append } } : {}),
-		};
-		const withMeta = Object.keys(antigravity).length > 0;
+		const { params, withMeta } = this.sessionParams(options);
 
 		try {
 			let response: AcpNewSessionResponse;
 			try {
-				response = await rpc.request<AcpNewSessionResponse>('session/new', withMeta
-					? { ...base, _meta: { antigravity } }
-					: base, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
+				response = await rpc.request<AcpNewSessionResponse>('session/new', params, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
 			} catch (error) {
 				// Without the options the agent would run with its own tools and no Copilot guidance, so the session is not created.
 				if (!withMeta || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
@@ -409,16 +399,57 @@ export class AgentClient implements vscode.Disposable {
 			this.log(`Created ACP session ${response.sessionId} with ${response.configOptions?.length ?? 0} config option(s)`);
 			this.noteSessionMeta(response._meta);
 			const session: AgentSession = { sessionId: response.sessionId, configOptions: response.configOptions ?? [] };
-
-			// ACP has no model field on `session/new`; the model is an ordinary config option.
-			const modelOption = options.model ? findModelOption(session.configOptions) : undefined;
-			if (options.model && modelOption && modelOption.currentValue !== options.model) {
-				session.configOptions = await this.setConfigOption(session.sessionId, modelOption.id, options.model) ?? session.configOptions;
-			}
+			await this.applyModel(session, options.model);
 			return session;
 		} catch (error) {
 			this.captureAuthState(error);
 			throw error;
+		}
+	}
+
+	/**
+	 * Opens the agent's stored conversation `sessionId` again, as it was: the
+	 * agent rebuilds the exact messages from its transcript, so the prompt cache
+	 * can serve them. The session keeps its id.
+	 */
+	async resumeSession(sessionId: string, options: CreateSessionOptions): Promise<AgentSession> {
+		const rpc = await this.ensureStarted();
+		try {
+			const response = await rpc.request<Partial<AcpNewSessionResponse>>('session/resume', { sessionId, ...this.sessionParams(options).params }, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
+			const resumedId = response?.sessionId ?? sessionId;
+			this.noteSessionMeta(response?._meta, 'session/resume response');
+			this.log(`Resumed ACP session ${resumedId} with ${response?.configOptions?.length ?? 0} config option(s)`);
+			const session: AgentSession = { sessionId: resumedId, configOptions: response?.configOptions ?? [] };
+			await this.applyModel(session, options.model);
+			return session;
+		} catch (error) {
+			this.captureAuthState(error);
+			throw error;
+		}
+	}
+
+	/**
+	 * The parameters a session is opened with. The append is part of them so a
+	 * resumed session keeps the prompt it was opened with, and the cache with it.
+	 */
+	private sessionParams(options: CreateSessionOptions) {
+		const base = { cwd: options.cwd, mcpServers: options.mcpServers };
+		const withoutOwnTools = !this.useBuiltInTools;
+		// TOOLS_INSTRUCTION is temporarily disabled (see the note at its definition).
+		const append = [/* withoutOwnTools ? TOOLS_INSTRUCTION : undefined, */ options.systemPromptAppend].filter(part => part).join('\n\n');
+		const antigravity = {
+			...(withoutOwnTools ? { disabledTools: DISABLED_BUILTIN_TOOLS } : {}),
+			...(append ? { systemPrompt: { append } } : {}),
+		};
+		const withMeta = Object.keys(antigravity).length > 0;
+		return { params: withMeta ? { ...base, _meta: { antigravity } } : base, withMeta };
+	}
+
+	/** ACP has no model field on `session/new`; the model is an ordinary config option. */
+	private async applyModel(session: AgentSession, model: string | undefined): Promise<void> {
+		const modelOption = model ? findModelOption(session.configOptions) : undefined;
+		if (model && modelOption && modelOption.currentValue !== model) {
+			session.configOptions = await this.setConfigOption(session.sessionId, modelOption.id, model) ?? session.configOptions;
 		}
 	}
 
@@ -623,8 +654,8 @@ export class AgentClient implements vscode.Disposable {
 		this.limitEmitter.fire(limit);
 	}
 
-	private noteSessionMeta(meta: Record<string, unknown> | undefined): void {
-		this.logMeta('session/new response', meta);
+	private noteSessionMeta(meta: Record<string, unknown> | undefined, where = 'session/new response'): void {
+		this.logMeta(where, meta);
 		const antigravity = meta?.antigravity;
 		const tier = antigravity && typeof antigravity === 'object' ? describeTier((antigravity as Record<string, unknown>).tier) : undefined;
 		if (tier && tier !== this.tier) {

@@ -95,6 +95,20 @@ class FakeAgent {
 		return { sessionId: `acp-${++this.seq}`, configOptions: [] };
 	}
 
+	/** The sessions the provider asked the agent to open again, and the prompt each was given. */
+	readonly resumed: string[] = [];
+	readonly resumedPrompts: Array<string | undefined> = [];
+
+	async resumeSession(sessionId: string, options: CreateSessionOptions): Promise<{ sessionId: string; configOptions: never[] }> {
+		const server = options.mcpServers[0];
+		if (server) {
+			this.endpoints.push({ url: server.url, authorization: server.headers[0].value });
+		}
+		this.resumed.push(sessionId);
+		this.resumedPrompts.push(options.systemPromptAppend);
+		return { sessionId, configOptions: [] };
+	}
+
 	readonly closed: string[] = [];
 
 	async closeSession(sessionId: string): Promise<void> {
@@ -531,5 +545,98 @@ describe('GoogleAcpProvider tool calls', () => {
 		expect(agent.closed).toContain('acp-1');
 		agent.finishTurn();
 		await response.catch(() => undefined);
+	});
+});
+
+describe('GoogleAcpProvider session reuse', () => {
+	let bridge: McpBridge;
+
+	beforeEach(() => {
+		bridge = new McpBridge(() => { });
+	});
+
+	afterEach(() => {
+		bridge.dispose();
+	});
+
+	function memento(): vscode.Memento {
+		const values = new Map<string, unknown>();
+		return {
+			keys: () => [...values.keys()],
+			get: <T>(key: string, fallback?: T) => (values.has(key) ? values.get(key) as T : fallback),
+			update: (key: string, value: unknown) => { values.set(key, value); return Promise.resolve(); },
+		} as vscode.Memento;
+	}
+
+	const opening = [system('<instructions>Be helpful.</instructions>'), user('hello')];
+
+	/** Runs the first turn of a chat in a provider of its own, then closes it, as a window reload does. */
+	async function firstWindow(state: vscode.Memento, firstAgent: FakeAgent, append = 'appended'): Promise<void> {
+		const provider = new GoogleAcpProvider(firstAgent as unknown as AgentClient, bridge, silentOutput(), state, async () => append);
+		const token = new CancellationTokenSource();
+		const response = provider.provideLanguageModelChatResponse(model, opening, options, recorder(), token.token);
+		await waitFor(() => firstAgent.prompts === 1);
+		firstAgent.finishTurn();
+		await response;
+		provider.dispose();
+	}
+
+	it('resumes the stored conversation instead of restoring the chat as a transcript', async () => {
+		const state = memento();
+		const firstAgent = new FakeAgent();
+		await firstWindow(state, firstAgent);
+
+		const secondAgent = new FakeAgent();
+		const second = new GoogleAcpProvider(secondAgent as unknown as AgentClient, bridge, silentOutput(), state, async () => 'appended');
+		const response = second.provideLanguageModelChatResponse(model, [...opening, assistant('hi'), user('again')], options, recorder(), new CancellationTokenSource().token);
+		await waitFor(() => secondAgent.resumed.length === 1);
+
+		expect(secondAgent.resumed).toEqual(['acp-1']);
+		expect(secondAgent.resumedPrompts).toEqual(['appended']);
+		expect(secondAgent.sessionCount).toBe(1);
+
+		// The prompt holds only the messages the resumed session has not seen.
+		expect(secondAgent.promptTexts[0]).not.toContain('hello');
+		expect(secondAgent.promptTexts[0]).toContain('again');
+
+		secondAgent.finishTurn('acp-1');
+		await response;
+		second.dispose();
+	});
+
+	it('starts a new session when the agent no longer has the stored one', async () => {
+		const state = memento();
+		const firstAgent = new FakeAgent();
+		await firstWindow(state, firstAgent);
+
+		const secondAgent = new FakeAgent();
+		secondAgent.resumeSession = async () => { throw new Error('unknown session'); };
+		const second = new GoogleAcpProvider(secondAgent as unknown as AgentClient, bridge, silentOutput(), state, async () => 'appended');
+		const response = second.provideLanguageModelChatResponse(model, [...opening, assistant('hi'), user('again')], options, recorder(), new CancellationTokenSource().token);
+		await waitFor(() => secondAgent.prompts === 1);
+
+		expect(secondAgent.sessionCount).toBe(1);
+		expect(secondAgent.promptTexts[0]).toContain('hello');
+
+		secondAgent.finishTurn('acp-1');
+		await response;
+		second.dispose();
+	});
+
+	it('starts a new session when the chat no longer matches the stored one', async () => {
+		const state = memento();
+		const firstAgent = new FakeAgent();
+		await firstWindow(state, firstAgent);
+
+		const secondAgent = new FakeAgent();
+		const second = new GoogleAcpProvider(secondAgent as unknown as AgentClient, bridge, silentOutput(), state, async () => 'appended');
+		const other = [system('<instructions>Be helpful.</instructions>'), user('something else entirely')];
+		const response = second.provideLanguageModelChatResponse(model, other, options, recorder(), new CancellationTokenSource().token);
+		await waitFor(() => secondAgent.prompts === 1);
+
+		expect(secondAgent.resumed).toEqual([]);
+		secondAgent.finishTurn('acp-1');
+		await response;
+		second.dispose();
 	});
 });

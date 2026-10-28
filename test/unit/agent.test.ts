@@ -121,6 +121,24 @@ describe('AgentClient', () => {
 			.rejects.toThrow(/refused the session options/);
 	});
 
+	it('resumes a stored session with the prompt it was opened with', async () => {
+		const client = createAgent();
+		const options = { cwd: temp, mcpServers: [], systemPromptAppend: 'Be brief.' };
+		const created = await client.createSession(options);
+		const resumed = await client.resumeSession(created.sessionId, options);
+
+		expect(resumed.sessionId).toBe(created.sessionId);
+		const logged = output.debug.mock.calls.map(call => String(call[0])).find(line => line.includes('session/resume response _meta'));
+		expect(logged).toContain('"systemPrompt":{"append":"Be brief."}');
+	});
+
+	it('reports a session the agent no longer has instead of creating one', async () => {
+		process.env.FAKE_ACP_MODE = 'reject-resume';
+		const client = createAgent();
+
+		await expect(client.resumeSession('gone', { cwd: temp, mcpServers: [] })).rejects.toThrow(/unknown session/);
+	});
+
 	it('closes a session cleanly', async () => {
 		const client = createAgent();
 		const session = await client.createSession({ cwd: temp, mcpServers: [] });

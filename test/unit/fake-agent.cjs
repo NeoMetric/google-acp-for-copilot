@@ -31,6 +31,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 		send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Invalid params: _meta' } });
 	} else if (message.method === 'session/new') {
 		send({ jsonrpc: '2.0', id: message.id, result: { _meta: { received: message.params._meta ?? null }, sessionId: `s${++sessions}`, configOptions: [{ id: 'model', name: 'Model', 		category: 'model', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
+	} else if (message.method === 'session/resume') {
+		if (process.env.FAKE_ACP_MODE === 'reject-resume') {
+			send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Invalid params: unknown session' } });
+		} else {
+			send({ jsonrpc: '2.0', id: message.id, result: { _meta: { received: message.params._meta ?? null }, sessionId: message.params.sessionId, configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
+		}
 	} else if (message.method === 'session/close') {
 		send({ jsonrpc: '2.0', id: message.id, result: {} });
 	} else if (message.method === 'session/prompt') {

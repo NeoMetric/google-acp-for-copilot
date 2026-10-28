@@ -2,7 +2,7 @@
   "name": "google-acp-for-copilot",
   "displayName": "Google ACP for Copilot",
   "description": "Use Google Antigravity and Gemini models inside GitHub Copilot Chat by running Google's Agent Client Protocol server locally.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "NeoMetric",
   "license": "MIT",
   "icon": "media/icon.png",

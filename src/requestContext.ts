@@ -119,12 +119,8 @@ export function workspaceFoldersOf(messages: readonly vscode.LanguageModelChatRe
 	return undefined;
 }
 
-/**
- * The identity preamble of a host that writes its system prompt as XML
- * sections. Everything from the first section on is guidance the agent would
- * otherwise never see.
- */
-const FIRST_SECTION = /^[ \t]*<[A-Za-z][\w-]*[\s>]/m;
+/** The marker Copilot writes into its prompt for its own cache breakpoints, which mean nothing to an agent. */
+const CACHE_CONTROL = /\[copilot_cache_control:[^\]\n]*\]/g;
 
 /**
  * The guidance the host writes in the system message of the request, which the
@@ -133,12 +129,12 @@ const FIRST_SECTION = /^[ \t]*<[A-Za-z][\w-]*[\s>]/m;
  * guidance for the tools it offers, and the preferences of the user for this
  * conversation.
  *
- * The identity preamble is left out, since the agent has a prompt of its own,
- * and so is the personality text found anywhere else in the guidance
- * (`IDENTITY_PATTERNS`). Everything else the host wrote is kept as it stands: its skill and agent
- * lists, its index of instruction files and its rules for the memory tool all
- * reach the agent in the host's own words. Text the user or the agent wrote is
- * never read: only a system message counts. A host that sends more than one
+ * Only the personality is left out (`IDENTITY_PATTERNS`): the agent has a name
+ * and a voice of its own. Everything else the host wrote is kept as it stands,
+ * including the behaviour it states ahead of its first section — its skill and
+ * agent lists, its index of instruction files and its rules for the memory tool
+ * all reach the agent in the host's own words. Text the user or the agent wrote
+ * is never read: only a system message counts. A host that sends more than one
  * system message contributes each.
  */
 export function systemGuidanceOf(messages: readonly vscode.LanguageModelChatRequestMessage[]): string | undefined {
@@ -148,12 +144,7 @@ export function systemGuidanceOf(messages: readonly vscode.LanguageModelChatRequ
 		if (!isSystemMessage(message)) {
 			continue;
 		}
-		const text = textOf(message);
-		const start = FIRST_SECTION.exec(text)?.index;
-		if (start === undefined) {
-			continue;
-		}
-		const section = stripIdentity(text.slice(start)).trim();
+		const section = stripIdentity(textOf(message).replace(CACHE_CONTROL, '')).trim();
 		if (section.length > 0) {
 			sections.push(section);
 		}

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.6 - 2026-10-29
+
+### Added
+
+- A chat continued after the window was reloaded resumes its stored agent conversation instead of pasting the chat into a new session, so the prompt cache serves it. Each step is logged under `[reuse]`, with the cache figures of the first model call afterwards.
+
+### Changed
+
+- Copilot's system prompt now reaches the agent with only Copilot's personality and identity removed. The behaviour it states ahead of its first section, such as following the user's requirements to the letter, is kept; the content policy is carried once, by the intro the extension writes; its `[copilot_cache_control]` markers are dropped; and a prompt that has no sections at all is no longer lost.
+- The intro the extension writes now tells the agent that a note on a tool result is the user's newest message, as the other ACP extensions do, and words the `call_mcp_tool` rule the same way.
+
 ## 0.1.5 - 2026-10-24
 
 ### Fixed
