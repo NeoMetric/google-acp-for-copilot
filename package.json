@@ -150,6 +150,14 @@
             "Always use the signed-in account and ignore the saved API key, GEMINI_API_KEY and GOOGLE_API_KEY."
           ],
           "markdownDescription": "Which credentials the agent uses when both a Gemini API key and a signed-in account are available. Changing it restarts the agent."
+        },
+        "googleAcp.sessions.idleTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 0,
+          "scope": "machine",
+          "order": 7,
+          "markdownDescription": "Every Copilot chat runs in an agent session of its own. A chat that has been idle this many seconds gives its session back; its next message starts a new session rebuilt from the chat's transcript. Set to `0` to keep a chat's session until the chat limit or a restart closes it."
         }
       }
     }

@@ -98,6 +98,17 @@ describe('McpBridge', () => {
 		expect(body.result.tools).toEqual([{ name: 'read_file', description: 'Reads a file', inputSchema: tools[0].inputSchema }]);
 	});
 
+	it('lists the tools in the same order however Copilot orders them', async () => {
+		const tool = (name: string) => ({ name, description: name, inputSchema: { type: 'object' } }) as vscode.LanguageModelChatTool;
+		bridge.updateTools(endpoint.token, [tool('read_file'), tool('apply_patch'), tool('grep')]);
+		const first = (await rpc('tools/list')).result.tools.map((listed: { name: string }) => listed.name);
+		bridge.updateTools(endpoint.token, [tool('grep'), tool('read_file'), tool('apply_patch')]);
+		const second = (await rpc('tools/list')).result.tools.map((listed: { name: string }) => listed.name);
+
+		expect(first).toEqual(['apply_patch', 'grep', 'read_file']);
+		expect(second).toEqual(first);
+	});
+
 	it('picks up replaced tools', async () => {
 		bridge.updateTools(endpoint.token, []);
 
@@ -172,7 +183,7 @@ describe('McpBridge', () => {
 		const body = await rpc('tools/call', { name: 'read_file' });
 
 		expect(body.result.isError).toBe(true);
-		expect(body.result.content[0].text).toContain('cannot run right now');
+		expect(body.result.content[0].text).toContain('The user cancelled the tool call.');
 	});
 
 	it('reports an executor failure as a tool error', async () => {

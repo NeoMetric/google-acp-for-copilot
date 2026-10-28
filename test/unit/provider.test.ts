@@ -251,6 +251,30 @@ describe('GoogleAcpProvider tool calls', () => {
 		await third.response;
 	});
 
+	it('fails a held tool call with Copilot\'s cancel text when the turn is replaced', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+
+		const first = request(history, token.token);
+		void callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		const [call] = toolCallsOf(first.progress);
+
+		const held = callTool('grep', { pattern: 'x' });
+		await delay(50);
+		history.push(assistant('working'), user(toolResult(call.callId), 'wait, stop'));
+		const second = request(history, token.token);
+		await waitFor(() => agent.prompts === 2);
+
+		const outcome = (await held).result;
+		expect(outcome.isError).toBe(true);
+		expect(outcome.content[0].text).toBe('The user cancelled the tool call.');
+
+		agent.finishTurn();
+		await second.response;
+	});
+
 	it('cancels the turn when Copilot cancels the request that handed a tool over', async () => {
 		const token = new CancellationTokenSource();
 
@@ -352,7 +376,7 @@ describe('GoogleAcpProvider tool calls', () => {
 		const late = await callTool('read_file', { path: 'a.txt' });
 
 		expect(late.result.isError).toBe(true);
-		expect(late.result.content[0].text).toContain('cannot run right now');
+		expect(late.result.content[0].text).toContain('The user cancelled the tool call.');
 	});
 
 	it('emits cache stats on turn completion when token usage is available', async () => {
@@ -414,7 +438,7 @@ describe('GoogleAcpProvider tool calls', () => {
 		agent.finishTurn();
 		await titled;
 
-		expect(listed).toEqual(['read_file', 'grep']);
+		expect(listed).toEqual(['grep', 'read_file']);
 		expect(agent.sessionCount).toBe(1);
 	});
 

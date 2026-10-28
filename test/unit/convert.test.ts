@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it } from 'vitest';
-import { chatContextBlock, diverged, fingerprint, imageFingerprint, lastUserMessageIndex, promptTextOf, textOf, toAcpContentBlocks, toTranscriptBlock } from '../../src/convert';
+import { chatContextBlock, customInstructionsBlock, diverged, fingerprint, imageFingerprint, lastUserMessageIndex, promptTextOf, textOf, toAcpContentBlocks, toTranscriptBlock } from '../../src/convert';
 import { assistant, image, system, toolCall, toolResult, user } from './messages';
 
 describe('textOf', () => {
@@ -122,6 +122,58 @@ describe('chatContextBlock', () => {
 	});
 });
 
+describe('customInstructionsBlock', () => {
+	const intro = 'When generating code, please follow these user provided coding instructions. You can ignore an instruction if it contradicts a system message.';
+	const instructions = `${intro}\n<instructions>\nUse tabs.\n</instructions>`;
+	const mode = '<modeInstructions>\nYou are currently running in "Plan" mode.\n</modeInstructions>';
+
+	it('forwards the instructions of the user with their introduction, and the instructions of the mode', () => {
+		const block = customInstructionsBlock([
+			system('You are Copilot.'),
+			user(`${instructions}\n${mode}`),
+			user('<userRequest>go</userRequest>'),
+		]);
+
+		expect(block).toEqual({ type: 'text', text: `${instructions}\n\n${mode}` });
+	});
+
+	it('finds them in the message that carries the request, and keeps them out of the turn text', () => {
+		const message = user(`${instructions}\n${mode}\n<context>now</context><userRequest>go</userRequest>`);
+
+		expect(customInstructionsBlock([message])?.text).toContain('Use tabs.');
+		expect(toAcpContentBlocks([message])).toEqual([{ type: 'text', text: '<context>now</context>\n\ngo' }]);
+	});
+
+	it('sends each distinct block once however many messages repeat it', () => {
+		const block = customInstructionsBlock([user(instructions), assistant('ok'), user(`${instructions}\n<userRequest>go</userRequest>`)]);
+
+		expect(block?.text.match(/Use tabs\./g)).toHaveLength(1);
+	});
+
+	it('keeps them out of the chat context and of a message that carries nothing else', () => {
+		expect(chatContextBlock([user(`${instructions}\n<environment_info>Linux</environment_info>`), user('<userRequest>go</userRequest>')]))
+			.toEqual({ type: 'text', text: '<environment_info>Linux</environment_info>' });
+		expect(toAcpContentBlocks([user(`${instructions}\n${mode}`)])).toEqual([]);
+	});
+
+	it('ignores instructions inside what the user attached, and system messages', () => {
+		expect(customInstructionsBlock([
+			system(instructions),
+			user('<attachments><attachment><instructions>Quoted.</instructions></attachment></attachments><userRequest>go</userRequest>'),
+		])).toBeUndefined();
+	});
+
+	it('is the same bytes on consecutive turns, and never reaches the transcript or the turn text again', () => {
+		const turn = (request: string) => user(`${instructions}\n${mode}\n<context>The current date is ${request}.</context><userRequest>${request}</userRequest>`);
+		const first = [system('<rules>x</rules>'), turn('one')];
+		const second = [...first, assistant('done'), turn('two')];
+
+		expect(customInstructionsBlock(second)).toEqual(customInstructionsBlock(first));
+		expect(JSON.stringify(toAcpContentBlocks(second.slice(-1)))).not.toContain('Use tabs.');
+		expect(toTranscriptBlock(second.slice(0, -1))?.text).not.toContain('Use tabs.');
+		expect(toTranscriptBlock(second.slice(0, -1))?.text).not.toContain('Plan');
+	});
+});
 describe('prompt edge cases', () => {
 	it('keeps the state of the turn when the request itself is empty, as native sends it', () => {
 		expect(toAcpContentBlocks([user('<context>x</context><userRequest>   </userRequest>')]))
@@ -159,6 +211,13 @@ describe('fingerprint and diverged', () => {
 
 		expect(fingerprint(first)).toBe(fingerprint(second));
 		expect(fingerprint(first)).not.toBe(fingerprint(user('Git repository root: C:\\repo')));
+	});
+
+	it('keeps a chat undiverged when only the mode instructions changed', () => {
+		const turn = (mode: string) => user(`<modeInstructions>\nYou are currently running in "${mode}" mode.\n</modeInstructions>\n<userRequest>hi</userRequest>`);
+
+		expect(fingerprint(turn('Plan'))).toBe(fingerprint(turn('Agent')));
+		expect(diverged([turn('Plan')].map(fingerprint), [turn('Agent'), assistant('ok')].map(fingerprint))).toBe(false);
 	});
 
 	it('keeps a chat undiverged when only its system message was re-rendered', () => {

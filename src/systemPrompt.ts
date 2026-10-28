@@ -100,7 +100,8 @@ function toolArgumentsSection(tools: readonly ToolArguments[] | undefined): stri
 	let omitted = 0;
 	let remaining = TOOL_ARGUMENTS_CHAR_BUDGET;
 
-	for (const tool of tools ?? []) {
+	// Sorted, so the same tools give the same bytes however Copilot orders them.
+	for (const tool of [...tools ?? []].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
 		if (tool.required.length === 0) {
 			continue;
 		}

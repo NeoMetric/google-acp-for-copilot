@@ -6,6 +6,7 @@
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { isSystemMessage, textOf } from './convert';
+import { stripIdentity } from './identityPatterns';
 
 /**
  * What a request says about the chat it belongs to. Copilot gives a provider
@@ -133,7 +134,8 @@ const FIRST_SECTION = /^[ \t]*<[A-Za-z][\w-]*[\s>]/m;
  * conversation.
  *
  * The identity preamble is left out, since the agent has a prompt of its own,
- * and everything else the host wrote is kept as it stands: its skill and agent
+ * and so is the personality text found anywhere else in the guidance
+ * (`IDENTITY_PATTERNS`). Everything else the host wrote is kept as it stands: its skill and agent
  * lists, its index of instruction files and its rules for the memory tool all
  * reach the agent in the host's own words. Text the user or the agent wrote is
  * never read: only a system message counts. A host that sends more than one
@@ -151,7 +153,7 @@ export function systemGuidanceOf(messages: readonly vscode.LanguageModelChatRequ
 		if (start === undefined) {
 			continue;
 		}
-		const section = text.slice(start).trim();
+		const section = stripIdentity(text.slice(start)).trim();
 		if (section.length > 0) {
 			sections.push(section);
 		}

@@ -45,6 +45,7 @@ Google's [Antigravity terms](https://antigravity.google/terms) do not allow thir
 | `googleAcp.agent.args` | empty | Arguments for that program; empty means none |
 | `googleAcp.permissionMode` | `auto` | `auto` approves the agent's own permission requests, `ask` shows the options |
 | `googleAcp.authPreference` | `auto` | `auto`, `apiKey` or `oauth` (ignore `GEMINI_API_KEY` and the saved key) |
+| `googleAcp.sessions.idleTimeoutSeconds` | `120` | A chat that has been idle this long gives back its agent session; its next message starts a new one rebuilt from the chat's transcript. `0` keeps the session until the chat limit or a restart closes it |
 
 | `googleAcp.useAgentBuiltInTools` | `false` | Let the agent use its own file, shell and search tools. Off by default: the extension asks Antigravity not to use them and declines their permission requests, so your Copilot chat's tools do the work |
 

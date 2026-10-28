@@ -72,7 +72,8 @@ export function promptTextOf(message: vscode.LanguageModelChatRequestMessage): s
 	const text = textOf(message);
 	const request = USER_REQUEST.exec(text);
 	if (!request) {
-		const withoutContext = text.replace(COPILOT_CONTEXT, '');
+		// The instructions of the user and of the mode reach the agent through `customInstructionsBlock`.
+		const withoutContext = text.replace(COPILOT_CONTEXT, '').replace(CUSTOM_INSTRUCTIONS, '');
 		return withoutContext === text ? text : withoutContext.trim();
 	}
 	const kept: string[] = [];
@@ -90,7 +91,41 @@ export function promptTextOf(message: vscode.LanguageModelChatRequestMessage): s
  * and native keeps it in one message that stays in the conversation, so it is
  * forwarded once, when a session that has seen nothing starts.
  */
-const CHAT_CONTEXT = /<(environment_info|workspace_info|userMemory|sessionMemory|repoMemory|instructions)>[\s\S]*?<\/\1>/g;
+const CHAT_CONTEXT = /<(environment_info|workspace_info|userMemory|sessionMemory|repoMemory)>[\s\S]*?<\/\1>/g;
+
+/**
+ * What the user and the mode told Copilot to follow, which it writes into a
+ * user message when its setting does not put them in the system message: the
+ * `<instructions>` block with the sentence that introduces it, and the
+ * `<modeInstructions>` of Plan, Agent and custom modes.
+ */
+const CUSTOM_INSTRUCTIONS = /(?:^[^\n<]*user provided coding instructions[^\n]*\r?\n)?<instructions>[\s\S]*?<\/instructions>|<modeInstructions>[\s\S]*?<\/modeInstructions>/gm;
+
+/**
+ * The instructions of the user and of the mode in the user messages of a
+ * request, each once however many messages repeat it. Copilot renders them
+ * afresh for every request, so the caller sends the block only when its text
+ * differs from the one the session already has.
+ */
+export function customInstructionsBlock(messages: readonly vscode.LanguageModelChatRequestMessage[]): AcpTextBlock | undefined {
+	const parts: string[] = [];
+
+	for (const message of messages) {
+		if (message.role !== vscode.LanguageModelChatMessageRole.User) {
+			continue;
+		}
+		// What the user attached is not an instruction of Copilot's, even when it contains the tag.
+		const text = textOf(message).replace(new RegExp(ATTACHMENTS.source, 'g'), '');
+		for (const match of text.matchAll(CUSTOM_INSTRUCTIONS)) {
+			const part = match[0].trim();
+			if (!parts.includes(part)) {
+				parts.push(part);
+			}
+		}
+	}
+
+	return parts.length === 0 ? undefined : { type: 'text', text: parts.join('\n\n') };
+}
 
 export function chatContextBlock(messages: readonly vscode.LanguageModelChatRequestMessage[]): AcpTextBlock | undefined {
 	const parts: string[] = [];
@@ -194,7 +229,8 @@ export function fingerprint(message: vscode.LanguageModelChatRequestMessage): st
 		}
 	}
 
-	return `${message.role}:${textOf(message)}:${imageFingerprint(message)}:${parts.join(',')}`;
+	// The instructions of the mode change when the user switches modes, which is no rewrite of the chat.
+	return `${message.role}:${textOf(message).replace(CUSTOM_INSTRUCTIONS, '')}:${imageFingerprint(message)}:${parts.join(',')}`;
 }
 
 /** Whether the messages the session has seen are no longer a prefix of the chat. */
@@ -272,10 +308,14 @@ export function toTranscriptBlock(messages: readonly vscode.LanguageModelChatReq
 	const firstUser = messages.findIndex(message => message.role === vscode.LanguageModelChatMessageRole.User);
 	const history = firstUser < 0 ? [] : messages.slice(firstUser);
 
-	for (const message of history) {
+	// What comes ahead of the first request is forwarded as the context of the chat.
+	const firstRequest = history.findIndex(message => USER_REQUEST.test(textOf(message)));
+
+	for (const [index, message] of history.entries()) {
 		const lines: string[] = [];
 
-		const text = promptTextOf(message).trim();
+		const prompt = promptTextOf(message);
+		const text = (firstRequest < 0 || index < firstRequest ? prompt.replace(CHAT_CONTEXT, '') : prompt).trim();
 		if (text.length > 0) {
 			lines.push(text);
 		}

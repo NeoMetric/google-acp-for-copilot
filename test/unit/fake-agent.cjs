@@ -27,8 +27,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 		send({ jsonrpc: '2.0', id: message.id, result: {} });
 	} else if (message.method === 'session/set_config_option') {
 		send({ jsonrpc: '2.0', id: message.id, result: { configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: message.params.value, options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
+	} else if (message.method === 'session/new' && process.env.FAKE_ACP_MODE === 'reject-meta' && message.params._meta) {
+		send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Invalid params: _meta' } });
 	} else if (message.method === 'session/new') {
-		send({ jsonrpc: '2.0', id: message.id, result: { sessionId: `s${++sessions}`, configOptions: [{ id: 'model', name: 'Model', 		category: 'model', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
+		send({ jsonrpc: '2.0', id: message.id, result: { _meta: { received: message.params._meta ?? null }, sessionId: `s${++sessions}`, configOptions: [{ id: 'model', name: 'Model', 		category: 'model', type: 'select', currentValue: 'default', options: [{ value: 'default', name: 'Default' }, { value: 'other', name: 'Other' }] }] } });
 	} else if (message.method === 'session/close') {
 		send({ jsonrpc: '2.0', id: message.id, result: {} });
 	} else if (message.method === 'session/prompt') {

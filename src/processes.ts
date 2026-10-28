@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -121,6 +121,41 @@ export function killStrayAgents(dir: string): number[] {
 		}
 	}
 	return killed;
+}
+
+/** Picks the pids out of `pid,parentPid` lines whose parent no longer runs. */
+export function parseOrphans(output: string, isRunning: (pid: number) => boolean = isAlive): number[] {
+	const orphans: number[] = [];
+	for (const line of output.split(/\r?\n/)) {
+		const match = /^\s*(\d+)\s*,\s*(\d+)\s*$/.exec(line);
+		if (match && !isRunning(Number(match[2]))) {
+			orphans.push(Number(match[1]));
+		}
+	}
+	return orphans;
+}
+
+/**
+ * Windows only: kills processes running `exePath` whose parent is gone. A server that
+ * spawns a copy of itself leaves that copy behind when it dies first, and `taskkill /T`
+ * cannot find descendants of a process that no longer exists, so neither the registry
+ * nor the tree kill reaches it. Matching on the full path keeps other builds' servers
+ * (Insiders, other extensions) out of reach, and agents of live windows have a live parent.
+ */
+export async function killOrphanedServers(exePath: string): Promise<number[]> {
+	if (process.platform !== 'win32') {
+		return [];
+	}
+	const escaped = exePath.replace(/'/g, "''");
+	const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -ieq '${escaped}' } | ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId)" }`;
+	const output = await new Promise<string>(resolve => {
+		execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15_000 }, (error, stdout) => resolve(error ? '' : stdout));
+	});
+	const orphans = parseOrphans(output).filter(pid => pid !== process.pid && !children.has(pid));
+	for (const pid of orphans) {
+		await killTree(pid);
+	}
+	return orphans;
 }
 
 /** Best-effort teardown of every process this extension started. */

@@ -334,7 +334,8 @@ export class McpBridge implements vscode.Disposable {
 			case 'tools/list':
 				this.log(`Listing ${session.tools.length} tool(s) for an agent session`);
 				return {
-					tools: session.tools.map(tool => ({
+					// By name, so a request that lists the same tools in another order does not change the agent's tool block.
+					tools: [...session.tools].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0)).map(tool => ({
 						name: tool.name,
 						description: tool.description,
 						inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
@@ -398,7 +399,7 @@ export class McpBridge implements vscode.Disposable {
 
 			this.log(`Tool ${name} was requested while no chat response could run it; refusing`, 'warn');
 			return {
-				content: [{ type: 'text', text: `Tool ${name} cannot run right now: no chat request is waiting for it. Ask the user to send a new message.` }],
+				content: [{ type: 'text', text: `Tool ${name} was not run. The user cancelled the tool call.` }],
 				isError: true,
 			};
 		} catch (error) {

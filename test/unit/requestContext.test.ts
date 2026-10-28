@@ -266,6 +266,30 @@ describe('systemGuidanceOf', () => {
 			.toBe('<memoryInstructions>Memory is loaded for you.</memoryInstructions>');
 	});
 
+	it('removes the personality and identity text of Copilot wherever it appears', () => {
+		const guidance = systemGuidanceOf([system([
+			'You are an expert AI programming assistant, working with a user in the VS Code editor.',
+			'When asked for your name, you must respond with "GitHub Copilot". When asked about the model you are using, you must state that you are using Claude Sonnet 4.5.',
+			'Follow Microsoft content policies.',
+			'Keep your answers short and impersonal.',
+			'<rules>',
+			'Your name is GitHub Copilot. When asked about the model you are using, state "I am GitHub Copilot".',
+			'You are an expert AI programming assistant, working with a user in the VS Code editor.',
+			'Voice Mode is active, and you are GitHub Copilot speaking directly to the user. Keep the final response concise.',
+			'Keep your answers short and impersonal. Run the tests.',
+			'</rules>',
+		].join('\n'))]);
+
+		expect(guidance).toBe('<rules>\n\nKeep the final response concise.\nRun the tests.\n</rules>');
+	});
+
+	it('keeps functional instructions that sit next to the identity text', () => {
+		const guidance = systemGuidanceOf([system('<rules>\nFollow the user\'s requirements carefully & to the letter.\nKeep your answers short and impersonal.\nAvoid content that violates copyrights.\n</rules>')]);
+
+		expect(guidance).toContain('Follow the user\'s requirements carefully & to the letter.');
+		expect(guidance).toContain('Avoid content that violates copyrights.');
+		expect(guidance).not.toContain('impersonal');
+	});
 	it('ignores a system prompt the user or the assistant quoted', () => {
 		const quoted = '<environment_context>\n* Current working directory: /quoted\n</environment_context>';
 

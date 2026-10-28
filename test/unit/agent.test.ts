@@ -104,6 +104,23 @@ describe('AgentClient', () => {
 		expect(result.usage).toMatchObject({ inputTokens: 3, outputTokens: 2, totalTokens: 5 });
 	});
 
+	it('turns off the built-in tools and appends the system prompt when a session starts', async () => {
+		const client = createAgent();
+		await client.createSession({ cwd: temp, mcpServers: [], systemPromptAppend: 'Be brief.' });
+
+		const logged = output.debug.mock.calls.map(call => String(call[0])).find(line => line.includes('session/new response _meta'));
+		expect(logged).toContain('"disabledTools":["run_command"');
+		expect(logged).toContain('"systemPrompt":{"append":"Be brief."}');
+	});
+
+	it('fails the session instead of retrying without the options the server refused', async () => {
+		process.env.FAKE_ACP_MODE = 'reject-meta';
+		const client = createAgent();
+
+		await expect(client.createSession({ cwd: temp, mcpServers: [], systemPromptAppend: 'Be brief.' }))
+			.rejects.toThrow(/refused the session options/);
+	});
+
 	it('closes a session cleanly', async () => {
 		const client = createAgent();
 		const session = await client.createSession({ cwd: temp, mcpServers: [] });

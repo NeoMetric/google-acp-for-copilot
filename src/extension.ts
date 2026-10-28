@@ -19,8 +19,6 @@ const SETUP_OFFERED_KEY = 'googleAcp.setupOffered';
 /** Set once the terms-of-service notice was shown, so it is never repeated. */
 const NOTICE_SHOWN_KEY = 'googleAcp.noticeShown';
 
-let activeProvider: GoogleAcpProvider | undefined;
-
 export function activate(context: vscode.ExtensionContext): void {
 	const output = vscode.window.createOutputChannel("Google ACP", { log: true });
 	const log = scopedLog(output);
@@ -29,7 +27,6 @@ export function activate(context: vscode.ExtensionContext): void {
 	const apiKeys = new ApiKeyStore(context.secrets);
 	const agent = new AgentClient(context, output, apiKeys);
 	const provider = new GoogleAcpProvider(agent, bridge, output, context.globalState, createSessionPrompt(scopedLog(output, 'prompt'), path.join(path.dirname(path.dirname(context.globalStorageUri.fsPath)), 'prompts')));
-	activeProvider = provider;
 
 	const reportFailure = (what: string, error: unknown) => {
 		const reason = error instanceof Error ? error.message : String(error);
@@ -125,12 +122,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	void startUp(context, agent, provider);
 }
 
-export async function deactivate(): Promise<void> {
-	try {
-		await activeProvider?.closeAllSessions();
-	} catch {
-		// Clean exit; process termination follows either way.
-	}
+export function deactivate(): void {
+	// Not after closing the sessions: that waits on the agent, and a hung agent would
+	// keep the kill from ever running before the host exits.
 	killAllChildren();
 }
 

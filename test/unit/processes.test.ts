@@ -2,7 +2,14 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { forgetAgent, killStrayAgents, recordAgent } from '../../src/processes';
+import { forgetAgent, killStrayAgents, parseOrphans, recordAgent } from '../../src/processes';
+
+describe('orphan detection', () => {
+	it('reports only processes whose parent is gone', () => {
+		const output = '100,1\r\n200,2\n\nnoise\n300, 3\n';
+		expect(parseOrphans(output, pid => pid === 2)).toEqual([100, 300]);
+	});
+});
 
 describe('agent registry', () => {
 	let dir: string;

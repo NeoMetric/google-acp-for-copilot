@@ -13,7 +13,7 @@ import { assertShellSafe, launchSpecFor, resolveCommand, type LaunchSpec } from 
 import { ServerInstaller } from './server';
 import { levelOfLine, scopedLog, type Log, type LogLevel } from './logging';
 import { findModelOption } from './models';
-import { forgetAgent, killStrayAgents, killTree, killTreeSync, pipeLines, recordAgent, trackChild, untrackChild } from './processes';
+import { forgetAgent, killOrphanedServers, killStrayAgents, killTree, killTreeSync, pipeLines, recordAgent, trackChild, untrackChild } from './processes';
 import { describeTier, formatReset, parseQuotaError, QuotaLimitError, type QuotaLimit } from './quota';
 import { isAuthRequiredError, JsonRpcConnection, RpcConnectionClosedError, RpcError } from './rpc';
 
@@ -400,12 +400,11 @@ export class AgentClient implements vscode.Disposable {
 					? { ...base, _meta: { antigravity } }
 					: base, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
 			} catch (error) {
-				// A server that rejects the extra `_meta` must not lose the session over it.
+				// Without the options the agent would run with its own tools and no Copilot guidance, so the session is not created.
 				if (!withMeta || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
 					throw error;
 				}
-				this.log(`The server refused the session options (${describeError(error)}); creating the session without them.`, 'warn');
-				response = await rpc.request<AcpNewSessionResponse>('session/new', base, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
+				throw new Error(`The Google agent refused the session options that turn off its built-in tools and carry the Copilot guidance (${describeError(error)}), so no session was started. Update the Antigravity ACP server.`, { cause: error });
 			}
 			this.log(`Created ACP session ${response.sessionId} with ${response.configOptions?.length ?? 0} config option(s)`);
 			this.noteSessionMeta(response._meta);
@@ -706,6 +705,12 @@ export class AgentClient implements vscode.Disposable {
 		}
 		this.spawnedWithKey = apiKey;
 		const strays = killStrayAgents(this.agentRegistry);
+		if (this.usesDownloadedServer) {
+			strays.push(...await killOrphanedServers(resolved.file));
+			if (this.disposed || generation !== this.generation) {
+				throw new StartSupersededError();
+			}
+		}
 		if (strays.length > 0) {
 			this.log(`Stopped ${strays.length} leftover agent process(es) from closed windows: ${strays.join(', ')}`, 'warn');
 		}
