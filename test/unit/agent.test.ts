@@ -145,6 +145,93 @@ describe('AgentClient', () => {
 		await expect(client.closeSession(session.sessionId)).resolves.toBeUndefined();
 	});
 
+	it('stops the idle process after its last session closes and starts again on demand', async () => {
+		const client = createAgent();
+		const first = await client.createSession({ cwd: temp, mcpServers: [] });
+		const registry = path.join(temp, 'storage', 'agents', `${process.pid}.json`);
+		const firstPid = JSON.parse(fs.readFileSync(registry, 'utf8')).childPid as number;
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			await client.closeSession(first.sessionId);
+			await vi.advanceTimersByTimeAsync(30_000);
+		} finally {
+			vi.useRealTimers();
+		}
+		await vi.waitFor(() => expect(isAlive(firstPid)).toBe(false), { timeout: 5_000 });
+		const resumed = await client.resumeSession(first.sessionId, { cwd: temp, mcpServers: [] });
+		const result = await client.prompt(resumed.sessionId, [{ type: 'text', text: 'again' }], { onText: () => { } });
+		expect(result.stopReason).toBe('end_turn');
+		const second = await client.createSession({ cwd: temp, mcpServers: [] });
+		expect(second.sessionId).toBeDefined();
+	}, SLOW_KILL_TIMEOUT_MS);
+
+	it.each(['startup only', 'failed session'] as const)('stops an idle server after %s', async scenario => {
+		if (scenario === 'failed session') {
+			process.env.FAKE_ACP_MODE = 'reject-meta';
+		}
+		const client = createAgent();
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		let pid: number;
+		try {
+			if (scenario === 'startup only') {
+				await client.ensureStarted();
+			} else {
+				await expect(client.createSession({ cwd: temp, mcpServers: [] })).rejects.toThrow(/refused the session options/);
+			}
+			const registry = path.join(temp, 'storage', 'agents', `${process.pid}.json`);
+			pid = JSON.parse(fs.readFileSync(registry, 'utf8')).childPid as number;
+			await vi.advanceTimersByTimeAsync(30_000);
+		} finally {
+			vi.useRealTimers();
+		}
+		await vi.waitFor(() => expect(isAlive(pid)).toBe(false), { timeout: 5_000 });
+	}, SLOW_KILL_TIMEOUT_MS);
+
+	it('keeps the server while another session remains open', async () => {
+		const client = createAgent();
+		const first = await client.createSession({ cwd: temp, mcpServers: [] });
+		const second = await client.createSession({ cwd: temp, mcpServers: [] });
+		const registry = path.join(temp, 'storage', 'agents', `${process.pid}.json`);
+		const pid = JSON.parse(fs.readFileSync(registry, 'utf8')).childPid as number;
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			await client.closeSession(first.sessionId);
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(isAlive(pid)).toBe(true);
+			const result = await client.prompt(second.sessionId, [{ type: 'text', text: 'still here' }], { onText: () => { } });
+			expect(result.stopReason).toBe('end_turn');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not stop the server while a new session is being opened', async () => {
+		const client = createAgent();
+		const first = await client.createSession({ cwd: temp, mcpServers: [] });
+		const registry = path.join(temp, 'storage', 'agents', `${process.pid}.json`);
+		const pid = JSON.parse(fs.readFileSync(registry, 'utf8')).childPid as number;
+		const ensureStarted = client.ensureStarted.bind(client);
+		let unblock!: () => void;
+		const gate = new Promise<void>(resolve => { unblock = resolve; });
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			await client.closeSession(first.sessionId);
+			vi.spyOn(client, 'ensureStarted').mockImplementation(async options => {
+				await gate;
+				return ensureStarted(options);
+			});
+			const opening = client.createSession({ cwd: temp, mcpServers: [] });
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(isAlive(pid)).toBe(true);
+			unblock();
+			const next = await opening;
+			const result = await client.prompt(next.sessionId, [{ type: 'text', text: 'hello' }], { onText: () => { } });
+			expect(result.stopReason).toBe('end_turn');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('answers permission requests by itself in auto mode', async () => {
 		const client = createAgent();
 		const session = await client.createSession({ cwd: temp, mcpServers: [] });
@@ -215,6 +302,25 @@ describe('AgentClient', () => {
 		const session = await client.createSession({ cwd: temp, mcpServers: [] });
 		expect(session.sessionId).toBe('s1');
 	});
+
+	it('stops quietly when idle and starts again on the next request', async () => {
+		const client = createAgent();
+		const changes: AgentChange[] = [];
+		client.onDidChange(change => changes.push(change));
+		await client.ensureStarted();
+		expect(client.isRunning).toBe(true);
+		const registry = path.join(temp, 'storage', 'agents');
+		expect(fs.readdirSync(registry)).toHaveLength(1);
+
+		await client.stopWhenIdle();
+
+		expect(client.isRunning).toBe(false);
+		expect(changes).toEqual([]);
+		expect(fs.existsSync(registry) ? fs.readdirSync(registry) : []).toHaveLength(0);
+		const session = await client.createSession({ cwd: temp, mcpServers: [] });
+		expect(session.sessionId).toBe('s1');
+		expect(client.isRunning).toBe(true);
+	}, SLOW_KILL_TIMEOUT_MS);
 
 	it('stops starting an agent that keeps dying, until it is restarted by hand', async () => {
 		const client = createAgent();

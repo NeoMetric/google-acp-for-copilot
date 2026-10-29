@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type * as vscode from 'vscode';
 import type { AgentClient, CreateSessionOptions } from '../../src/agent';
 import { McpBridge } from '../../src/bridge';
-import { GoogleAcpProvider, guidanceDiffers, offersNewTools, sessionKey } from '../../src/provider';
+import { GoogleAcpProvider, guidanceDiffers, keepsSessionAfterFailure, offersNewTools, sessionKey } from '../../src/provider';
+import { RpcConnectionClosedError } from '../../src/rpc';
 import { assistant, system, toolResult, user } from './messages';
 import { CancellationTokenSource, LanguageModelToolCallPart } from './vscode-mock';
 
@@ -38,6 +39,24 @@ describe('guidanceDiffers', () => {
 
 	it('sees a change when the host stops sending guidance', () => {
 		expect(guidanceDiffers('<instructions>Work.</instructions>', undefined)).toBe(true);
+	});
+});
+
+describe('keepsSessionAfterFailure', () => {
+	it('keeps the session so the next request reads its prompt cache', () => {
+		expect(keepsSessionAfterFailure(new Error('Quota exceeded'), 1, false)).toBe(true);
+	});
+
+	it('replaces a session whose connection is gone', () => {
+		expect(keepsSessionAfterFailure(new RpcConnectionClosedError(), 1, false)).toBe(false);
+	});
+
+	it('replaces a session that needs a sign-in', () => {
+		expect(keepsSessionAfterFailure(new Error('auth'), 1, true)).toBe(false);
+	});
+
+	it('replaces a session that keeps failing', () => {
+		expect(keepsSessionAfterFailure(new Error('broken'), 3, false)).toBe(false);
 	});
 });
 

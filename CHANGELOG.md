@@ -10,6 +10,8 @@
 
 - Copilot's system prompt now reaches the agent with only Copilot's personality and identity removed. The behaviour it states ahead of its first section, such as following the user's requirements to the letter, is kept; the content policy is carried once, by the intro the extension writes; its `[copilot_cache_control]` markers are dropped; and a prompt that has no sections at all is no longer lost.
 - The intro the extension writes now tells the agent that a note on a tool result is the user's newest message, as the other ACP extensions do, and words the `call_mcp_tool` rule the same way.
+- A failed turn keeps its session instead of starting a new one, so the next message reads the conversation from the prompt cache rather than paying for the prompt again. A session that fails three times in a row, loses its connection or needs a sign-in is still replaced.
+- When no chat has a session left, the agent process, with the helper processes the Antigravity server started, is stopped after 30 minutes and started again by the next message, so an unused window no longer keeps them running. The new `googleAcp.agent.idleShutdownMinutes` setting changes the time; `0` turns it off.
 
 ## 0.1.5 - 2026-10-24
 

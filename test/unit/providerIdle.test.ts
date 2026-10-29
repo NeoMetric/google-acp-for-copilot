@@ -19,7 +19,16 @@ class FakeAgent {
 	readonly prompts: StartedPrompt[] = [];
 	readonly requiresSignIn = false;
 	readonly closed: string[] = [];
+	stops = 0;
 	private sessions = 0;
+
+	get isRunning(): boolean {
+		return this.stops === 0;
+	}
+
+	async stopWhenIdle(): Promise<void> {
+		this.stops++;
+	}
 
 	readonly onDidChange = () => ({ dispose() { } });
 
@@ -144,6 +153,57 @@ describe('an idle chat session', () => {
 		await vi.advanceTimersByTimeAsync(30 * MINUTE);
 
 		expect(agent.closed).toEqual([]);
+	});
+});
+
+describe('the agent process', () => {
+	const SHUTDOWN_KEY = 'googleAcp.agent.idleShutdownMinutes';
+
+	afterEach(() => {
+		delete configValues[SHUTDOWN_KEY];
+	});
+
+	it('is stopped once no chat session is left for the idle shutdown time', async () => {
+		await finishTurn(opening(), 1);
+
+		await vi.advanceTimersByTimeAsync(3 * MINUTE);
+		expect(agent.closed).toEqual(['s1']);
+		expect(agent.stops).toBe(0);
+
+		await vi.advanceTimersByTimeAsync(20 * MINUTE);
+		expect(agent.stops).toBe(0);
+
+		await vi.advanceTimersByTimeAsync(15 * MINUTE);
+		expect(agent.stops).toBe(1);
+	});
+
+	it('is kept while a chat still has a session', async () => {
+		configValues[IDLE_KEY] = 0;
+		await finishTurn(opening(), 1);
+
+		await vi.advanceTimersByTimeAsync(2 * 60 * MINUTE);
+
+		expect(agent.stops).toBe(0);
+	});
+
+	it('is kept when the idle shutdown is turned off', async () => {
+		configValues[SHUTDOWN_KEY] = 0;
+		await finishTurn(opening(), 1);
+
+		await vi.advanceTimersByTimeAsync(2 * 60 * MINUTE);
+
+		expect(agent.closed).toEqual(['s1']);
+		expect(agent.stops).toBe(0);
+	});
+
+	it('is kept while a request keeps coming in', async () => {
+		await finishTurn(opening(), 1);
+		await vi.advanceTimersByTimeAsync(25 * MINUTE);
+		await finishTurn([...opening(), assistant('Hi'), user('Back again')], 2);
+
+		await vi.advanceTimersByTimeAsync(20 * MINUTE);
+
+		expect(agent.stops).toBe(0);
 	});
 });
 

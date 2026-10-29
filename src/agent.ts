@@ -46,6 +46,7 @@ const INITIALIZE_TIMEOUT_MS = 120_000;
 const NEW_SESSION_TIMEOUT_MS = 60_000;
 const SET_CONFIG_TIMEOUT_MS = 30_000;
 const CLOSE_SESSION_TIMEOUT_MS = 10_000;
+const SERVER_IDLE_TIMEOUT_MS = 30_000;
 
 /** How long a permission prompt waits for the user before the tool is declined. */
 const PERMISSION_TIMEOUT_MS = 5 * 60_000;
@@ -236,6 +237,9 @@ export class AgentClient implements vscode.Disposable {
 	private fastExits = 0;
 	private lastFailureAt = 0;
 	private disposed = false;
+	private readonly liveSessions = new Map<string, object>();
+	private idleOperations = 0;
+	private idleTimer: NodeJS.Timeout | undefined;
 
 	private readonly turnSinks = new Map<string, (update: AcpSessionUpdate) => void>();
 	/** Resolvers of the permission prompts that are open, by ACP session. */
@@ -338,16 +342,21 @@ export class AgentClient implements vscode.Disposable {
 
 	/** Starts the agent if needed and returns the live connection. */
 	async ensureStarted(options: EnsureStartedOptions = {}): Promise<JsonRpcConnection> {
-		// A restart (a changed API key, a sign-in) can overtake a start in flight; the start
-		// then begins again against the new state instead of failing the caller.
-		for (let attempt = 0; ; attempt++) {
-			try {
-				return await this.startOnce(options);
-			} catch (error) {
-				if (!(error instanceof StartSupersededError) || attempt >= 2 || this.disposed) {
-					throw error;
+		const release = this.holdServer();
+		try {
+			// A restart (a changed API key, a sign-in) can overtake a start in flight; the start
+			// then begins again against the new state instead of failing the caller.
+			for (let attempt = 0; ; attempt++) {
+				try {
+					return await this.startOnce(options);
+				} catch (error) {
+					if (!(error instanceof StartSupersededError) || attempt >= 2 || this.disposed) {
+						throw error;
+					}
 				}
 			}
+		} finally {
+			release();
 		}
 	}
 
@@ -381,29 +390,38 @@ export class AgentClient implements vscode.Disposable {
 	}
 
 	async createSession(options: CreateSessionOptions): Promise<AgentSession> {
-		const rpc = await this.ensureStarted();
-
-		const { params, withMeta } = this.sessionParams(options);
-
+		const release = this.holdServer();
 		try {
-			let response: AcpNewSessionResponse;
+			const rpc = await this.ensureStarted();
+
+			const { params, withMeta } = this.sessionParams(options);
+
 			try {
-				response = await rpc.request<AcpNewSessionResponse>('session/new', params, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
-			} catch (error) {
-				// Without the options the agent would run with its own tools and no Copilot guidance, so the session is not created.
-				if (!withMeta || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
-					throw error;
+				let response: AcpNewSessionResponse;
+				try {
+					response = await rpc.request<AcpNewSessionResponse>('session/new', params, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
+				} catch (error) {
+					// Without the options the agent would run with its own tools and no Copilot guidance, so the session is not created.
+					if (!withMeta || !(error instanceof RpcError) || error.code !== INVALID_PARAMS_CODE) {
+						throw error;
+					}
+					throw new Error(`The Google agent refused the session options that turn off its built-in tools and carry the Copilot guidance (${describeError(error)}), so no session was started. Update the Antigravity ACP server.`, { cause: error });
 				}
-				throw new Error(`The Google agent refused the session options that turn off its built-in tools and carry the Copilot guidance (${describeError(error)}), so no session was started. Update the Antigravity ACP server.`, { cause: error });
+				this.log(`Created ACP session ${response.sessionId} with ${response.configOptions?.length ?? 0} config option(s)`);
+				this.noteSessionMeta(response._meta);
+				const session: AgentSession = { sessionId: response.sessionId, configOptions: response.configOptions ?? [] };
+				await this.applyModel(session, options.model);
+				if (this.rpc !== rpc) {
+					throw new RpcConnectionClosedError("The Google agent was stopped while opening a session.");
+				}
+				this.liveSessions.set(session.sessionId, {});
+				return session;
+			} catch (error) {
+				this.captureAuthState(error);
+				throw error;
 			}
-			this.log(`Created ACP session ${response.sessionId} with ${response.configOptions?.length ?? 0} config option(s)`);
-			this.noteSessionMeta(response._meta);
-			const session: AgentSession = { sessionId: response.sessionId, configOptions: response.configOptions ?? [] };
-			await this.applyModel(session, options.model);
-			return session;
-		} catch (error) {
-			this.captureAuthState(error);
-			throw error;
+		} finally {
+			release();
 		}
 	}
 
@@ -413,18 +431,27 @@ export class AgentClient implements vscode.Disposable {
 	 * can serve them. The session keeps its id.
 	 */
 	async resumeSession(sessionId: string, options: CreateSessionOptions): Promise<AgentSession> {
-		const rpc = await this.ensureStarted();
+		const release = this.holdServer();
 		try {
-			const response = await rpc.request<Partial<AcpNewSessionResponse>>('session/resume', { sessionId, ...this.sessionParams(options).params }, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
-			const resumedId = response?.sessionId ?? sessionId;
-			this.noteSessionMeta(response?._meta, 'session/resume response');
-			this.log(`Resumed ACP session ${resumedId} with ${response?.configOptions?.length ?? 0} config option(s)`);
-			const session: AgentSession = { sessionId: resumedId, configOptions: response?.configOptions ?? [] };
-			await this.applyModel(session, options.model);
-			return session;
-		} catch (error) {
-			this.captureAuthState(error);
-			throw error;
+			const rpc = await this.ensureStarted();
+			try {
+				const response = await rpc.request<Partial<AcpNewSessionResponse>>('session/resume', { sessionId, ...this.sessionParams(options).params }, { timeoutMs: NEW_SESSION_TIMEOUT_MS });
+				const resumedId = response?.sessionId ?? sessionId;
+				this.noteSessionMeta(response?._meta, 'session/resume response');
+				this.log(`Resumed ACP session ${resumedId} with ${response?.configOptions?.length ?? 0} config option(s)`);
+				const session: AgentSession = { sessionId: resumedId, configOptions: response?.configOptions ?? [] };
+				await this.applyModel(session, options.model);
+				if (this.rpc !== rpc) {
+					throw new RpcConnectionClosedError("The Google agent was stopped while resuming a session.");
+				}
+				this.liveSessions.set(session.sessionId, {});
+				return session;
+			} catch (error) {
+				this.captureAuthState(error);
+				throw error;
+			}
+		} finally {
+			release();
 		}
 	}
 
@@ -455,16 +482,26 @@ export class AgentClient implements vscode.Disposable {
 
 	/** Releases an agent-side session; best effort, as the method is an ACP extension. */
 	async closeSession(sessionId: string): Promise<void> {
-		this.cancelOpenPermissions(sessionId);
-		const rpc = this.rpc;
-		if (!rpc) {
-			return;
-		}
+		const release = this.holdServer();
+		const generation = this.generation;
+		const session = this.liveSessions.get(sessionId);
 		try {
-			await rpc.request('session/close', { sessionId }, { timeoutMs: CLOSE_SESSION_TIMEOUT_MS });
-		} catch {
-			// The session is gone either way: an agent that does not know the method
-			// drops it when the process exits.
+			this.cancelOpenPermissions(sessionId);
+			const rpc = this.rpc;
+			if (!rpc) {
+				return;
+			}
+			try {
+				await rpc.request('session/close', { sessionId }, { timeoutMs: CLOSE_SESSION_TIMEOUT_MS });
+			} catch {
+				// The session is gone either way: an agent that does not know the method
+				// drops it when the process exits.
+			}
+		} finally {
+			if (generation === this.generation && this.liveSessions.get(sessionId) === session) {
+				this.liveSessions.delete(sessionId);
+			}
+			release();
 		}
 	}
 
@@ -626,6 +663,26 @@ export class AgentClient implements vscode.Disposable {
 		this.signInRequired = false;
 		this.authMethods = [];
 		this.changeEmitter.fire('restarted');
+	}
+
+	/** Whether an agent process is running or on its way up. */
+	get isRunning(): boolean {
+		return this.rpc !== undefined || this.starting !== undefined;
+	}
+
+	/**
+	 * Stops the process once nothing needs it. Unlike {@link restart} it keeps the
+	 * sign-in state and tells no listener, because nothing was lost: the next
+	 * request starts the agent again.
+	 */
+	async stopWhenIdle(): Promise<void> {
+		if (!this.rpc || this.starting) {
+			return;
+		}
+		this.log('Nothing has used the Google agent for a while; stopping it. The next request starts it again.');
+		await this.stopProcess();
+		// `handleExit` ignores a process that was detached first, so the record is dropped here.
+		forgetAgent(this.agentRegistry);
 	}
 
 	/** Tells which server runs and which credentials it was given. */
@@ -863,9 +920,34 @@ export class AgentClient implements vscode.Disposable {
 		}
 	}
 
+	private holdServer(): () => void {
+		clearTimeout(this.idleTimer);
+		this.idleTimer = undefined;
+		this.idleOperations++;
+		return () => {
+			this.idleOperations--;
+			if (this.disposed || this.idleOperations || this.liveSessions.size || !this.child) {
+				return;
+			}
+			this.idleTimer = setTimeout(() => {
+				this.idleTimer = undefined;
+				if (this.idleOperations || this.liveSessions.size || !this.child) {
+					return;
+				}
+				this.log('Stopping the idle Google agent.');
+				forgetAgent(this.agentRegistry);
+				void this.stopProcess();
+			}, SERVER_IDLE_TIMEOUT_MS);
+			this.idleTimer.unref();
+		};
+	}
+
 	/** Forgets the process and connection and fails everything that was waiting on them. */
 	private detachProcess(reason: Error): { child: cp.ChildProcess | undefined; rpc: JsonRpcConnection | undefined } {
 		const { child, rpc } = this;
+		clearTimeout(this.idleTimer);
+		this.idleTimer = undefined;
+		this.liveSessions.clear();
 		this.child = undefined;
 		this.rpc = undefined;
 		this.starting = undefined;

@@ -158,6 +158,14 @@
           "scope": "machine",
           "order": 7,
           "markdownDescription": "Every Copilot chat runs in an agent session of its own. A chat that has been idle this many seconds gives its session back; its next message starts a new session rebuilt from the chat's transcript. Set to `0` to keep a chat's session until the chat limit or a restart closes it."
+        },
+        "googleAcp.agent.idleShutdownMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "scope": "machine",
+          "order": 8,
+          "markdownDescription": "When no chat has a session left, the agent process itself is stopped after this many minutes, which frees everything it started, including the helper processes of the Antigravity server. The next message starts it again, which takes a moment. Set to `0` to keep the agent running for as long as the window is open."
         }
       }
     }

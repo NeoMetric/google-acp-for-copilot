@@ -34,14 +34,20 @@ const PARALLEL_TOOL_QUIET_MS = 40;
 /** How long to wait for an abandoned turn to end before moving on. */
 const ABANDONED_TURN_WAIT_MS = 5_000;
 /**
- * Every agent session is a server process of its own, so a chat that is not being
- * used gives its process back after this long. The chat is rebuilt from Copilot's
- * transcript on its next message. Settable; 0 keeps sessions until evicted.
+ * A chat that is not being used gives its session back after this long. The chat
+ * is resumed or rebuilt from Copilot's transcript on its next message.
+ * Settable; 0 keeps sessions until evicted.
  */
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 120;
 /** How long the session that reads the models lives after its last use. */
 const WARM_SESSION_IDLE_MS = 30_000;
 const IDLE_SWEEP_MS = 15_000;
+/**
+ * With no chat session left, the agent process itself is stopped after this long,
+ * which also takes down whatever the agent started under it. The next request
+ * starts it again. Settable; 0 keeps the agent for the whole window.
+ */
+const DEFAULT_AGENT_IDLE_MINUTES = 30;
 
 /**
  * How long a tool call may wait for a response to carry it. The agent gives up
@@ -49,6 +55,9 @@ const IDLE_SWEEP_MS = 15_000;
  * timeout into a clean error, which costs the agent less than an unclear failure.
  */
 const TOOL_WAIT_TIMEOUT_MS = 170_000;
+
+/** Failed turns in a row after which a session is replaced, so a broken one cannot trap a chat. */
+const MAX_TURN_FAILURES = 3;
 
 /** What Copilot itself tells the model when a tool call did not run. */
 const CANCELLED_TOOL_CALL = "The user cancelled the tool call.";
@@ -125,6 +134,8 @@ interface ChatSession {
 	reused?: { readonly how: 'resumed'; readonly from: string; logged: boolean };
 	/** When the chat last asked for something or finished a turn; a session idle for long enough is released. */
 	lastActive: number;
+	/** Turns that failed in a row; a turn that finishes resets it. */
+	failures: number;
 	effort?: string;
 	turn?: ActiveTurn;
 	cachedReadTokens: number;
@@ -186,6 +197,10 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	private warmSession: AgentSession | undefined;
 	private warmSessionCreation: Promise<AgentSession> | undefined;
 	private warmUsedAt = 0;
+	/** When the agent was last asked for anything or let go of a session; the idle shutdown counts from here. */
+	private lastAgentUse = Date.now();
+	/** Sessions being closed; the agent is not stopped under them. */
+	private closingCount = 0;
 	private sweepTimer: NodeJS.Timeout | undefined;
 	private signInWarningShown = false;
 	private disposed = false;
@@ -229,6 +244,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	private async lookupModels(options: { readonly silent?: boolean }): Promise<vscode.LanguageModelChatInformation[]> {
 		try {
 			await this.agent.ensureStarted({ silent: options.silent });
+			this.lastAgentUse = Date.now();
+			this.scheduleIdleSweep();
 			const warm = await this.ensureWarmSession();
 			// A logged-out agent still lists its models; chatting is what fails. Say so up front.
 			if (this.agent.requiresSignIn && !options.silent) {
@@ -324,6 +341,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			return;
 		}
 
+		this.lastAgentUse = Date.now();
 		const tools = options.tools ?? [];
 		const key = sessionKey(messages, options);
 		const context = chatContextOf(messages);
@@ -356,7 +374,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			this.applyTools(session, tools);
 			await this.applyEffort(session, effort);
 			this.trackCancellation(session.turn, token);
-			await this.driveTurn(key, session, progress, token, fingerprints);
+			await this.driveTurn(key, session, progress, token, fingerprints, lastUser);
 			return;
 		}
 		// The result of a call that already ended, such as one that timed out: the agent
@@ -367,7 +385,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			this.applyTools(session, tools);
 			await this.applyEffort(session, effort);
 			this.trackCancellation(session.turn, token);
-			await this.driveTurn(key, session, progress, token, fingerprints);
+			await this.driveTurn(key, session, progress, token, fingerprints, lastUser);
 			return;
 		}
 		if (session?.turn) {
@@ -450,7 +468,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.markSeen(session, fingerprints);
 		session.turn = this.startTurn(session, progress, token, blocks);
 		this.trackCancellation(session.turn, token);
-		await this.driveTurn(key, session, progress, token, fingerprints);
+		await this.driveTurn(key, session, progress, token, fingerprints, lastUser);
 	}
 
 	/** Records that the agent has been given every message of this request. */
@@ -535,6 +553,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.warmSession = undefined;
 		this.warmSessionCreation = undefined;
 		if (warm) {
+			this.lastAgentUse = Date.now();
 			await this.agent.closeSession(warm.sessionId);
 			this.log(`Closed warm session (${warm.sessionId}).`);
 		}
@@ -542,6 +561,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 
 	private async ensureWarmSession(): Promise<AgentSession> {
 		this.warmUsedAt = Date.now();
+		this.lastAgentUse = this.warmUsedAt;
 		if (this.warmSession) {
 			return this.warmSession;
 		}
@@ -573,7 +593,8 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.sweepTimer = setTimeout(() => {
 			this.sweepTimer = undefined;
 			this.releaseIdleSessions();
-			if (this.sessions.size > 0 || this.warmSession) {
+			this.stopIdleAgent();
+			if (this.sessions.size > 0 || this.warmSession || (this.agent.isRunning && this.agentIdleMs() > 0)) {
 				this.scheduleIdleSweep();
 			}
 		}, IDLE_SWEEP_MS);
@@ -581,7 +602,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	}
 
 	/**
-	 * Gives back the server processes of sessions nobody is using. A session with
+	 * Gives back sessions nobody is using. A session with
 	 * a turn is never released, including one waiting for Copilot to run a tool.
 	 * A released chat gets a new session on its next request.
 	 */
@@ -599,9 +620,30 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		const warm = this.warmSession;
 		if (warm && now - this.warmUsedAt >= WARM_SESSION_IDLE_MS) {
 			this.warmSession = undefined;
+			this.lastAgentUse = now;
 			this.log(`Releasing the session that reads models (${warm.sessionId}).`, 'debug');
 			void this.agent.closeSession(warm.sessionId);
 		}
+	}
+
+	private agentIdleMs(): number {
+		const minutes = vscode.workspace.getConfiguration('googleAcp').get<number>('agent.idleShutdownMinutes', DEFAULT_AGENT_IDLE_MINUTES);
+		return Number.isFinite(minutes) ? Math.max(0, minutes) * 60_000 : DEFAULT_AGENT_IDLE_MINUTES * 60_000;
+	}
+
+	/** Stops the agent process when no chat, release or lookup has needed it for the configured time. */
+	private stopIdleAgent(): void {
+		const idleMs = this.agentIdleMs();
+		if (idleMs <= 0 || !this.agent.isRunning) {
+			return;
+		}
+		if (this.sessions.size > 0 || this.closingCount > 0 || this.warmSession || this.warmSessionCreation) {
+			return;
+		}
+		if (Date.now() - this.lastAgentUse < idleMs) {
+			return;
+		}
+		void this.agent.stopWhenIdle();
 	}
 
 	private async createChatSession(key: string, model: vscode.LanguageModelChatInformation, tools: readonly vscode.LanguageModelChatTool[], context: ChatContext, reuse?: Reuse): Promise<ChatSession> {
@@ -656,6 +698,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 				guidanceHash: guidanceHashOf(context.guidance),
 				promptHash,
 				reused,
+				failures: 0,
 				lastActive: Date.now(),
 				cachedReadTokens: 0,
 				cachedWriteTokens: 0,
@@ -844,7 +887,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	}
 
 	/** Streams a turn into the current response until it finishes or needs a tool. */
-	private async driveTurn(key: string, session: ChatSession, progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken, fingerprints: readonly string[]): Promise<void> {
+	private async driveTurn(key: string, session: ChatSession, progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken, fingerprints: readonly string[], lastUser: number): Promise<void> {
 		const turn = session.turn;
 		if (!turn) {
 			return;
@@ -885,8 +928,22 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		this.failPendingToolCalls(turn, new Error(CANCELLED_TOOL_CALL));
 
 		if (turn.error) {
-			await this.destroySession(key);
 			this.log(`Turn failed after ${Date.now() - turn.startedAt}ms: ${describe(turn.error)}`, 'error');
+
+			// A failed turn is no reason to drop the session: the agent still holds the
+			// conversation, and the next request reads it from the prompt cache instead
+			// of paying for all of it again. The messages of the failed turn count as
+			// seen, since the agent was given them, except the user message itself:
+			// Retry resends the same messages and that one has to reach the agent. A
+			// session that keeps failing, a connection that is gone or a missing
+			// sign-in is replaced instead.
+			session.failures += 1;
+			if (keepsSessionAfterFailure(turn.error, session.failures, this.isSignInRequired(turn.error))) {
+				session.history.length = 0;
+				session.history.push(...fingerprints.slice(0, lastUser));
+			} else {
+				await this.destroySession(key);
+			}
 
 			if (this.isSignInRequired(turn.error)) {
 				this.promptSignIn();
@@ -903,6 +960,7 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 
 		session.history.length = 0;
 		session.history.push(...fingerprints);
+		session.failures = 0;
 		this.remember(key, session, fingerprints);
 
 		this.reportUsage(turn);
@@ -1211,7 +1269,13 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 			session.turn = undefined;
 		}
 		this.bridge.unregisterSession(session.endpoint.token);
-		await this.agent.closeSession(session.acp.sessionId);
+		this.closingCount++;
+		try {
+			await this.agent.closeSession(session.acp.sessionId);
+		} finally {
+			this.closingCount--;
+			this.lastAgentUse = Date.now();
+		}
 		this.log(`Closed the chat session for ${key} (${session.acp.sessionId}).`);
 	}
 
@@ -1263,6 +1327,17 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	private log(message: string, level: LogLevel = 'info'): void {
 		this.write(message, level);
 	}
+}
+
+/**
+ * Whether the session of a failed turn is still usable, and so is worth keeping:
+ * the agent holds the conversation, and the next request reads it from the
+ * prompt cache instead of paying for the whole of it again. A connection that
+ * is gone, a sign-in that is needed or a session that keeps failing leaves
+ * nothing to keep, and the next request starts a new session.
+ */
+export function keepsSessionAfterFailure(error: unknown, failures: number, signedOut: boolean): boolean {
+	return !signedOut && !(error instanceof RpcConnectionClosedError) && failures < MAX_TURN_FAILURES;
 }
 
 /**
