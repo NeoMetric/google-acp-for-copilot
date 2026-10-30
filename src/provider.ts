@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 import { type AcpSessionUpdate, AgentNotFoundError, type AgentChange, type AgentClient, type AgentSession, type PromptResult, workspaceCwd } from './agent';
 import { type McpBridge, type McpServerEndpoint, type McpToolResult } from './bridge';
-import { carriesToolResults, chatContextBlock, customInstructionsBlock, diverged, fingerprint, firstMessageAfterReply, isSystemMessage, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, userWordsAfterReply, type AcpContentBlock } from './convert';
+import { carriesToolResults, chatContextBlock, customInstructionsBlock, diverged, fingerprint, isSystemMessage, lastUserMessageIndex, textOf, toAcpContentBlocks, toTranscriptBlock, userWordsAfterReply, type AcpContentBlock } from './convert';
 import { scopedLog, type Log, type LogLevel } from './logging';
 import { acpModelValue, effortLevelsOf, effortOf, findEffortOption, findModelOption, flattenChoices, toModelVariants } from './models';
 import { conversationIdOf, resolveCwd, systemGuidanceOf, workspaceFoldersOf } from './requestContext';
@@ -380,6 +380,10 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 		// The result of a call that already ended, such as one that timed out: the agent
 		// went on without it, so the running turn is still the one to answer this request.
 		if (session && session.turn && !session.turn.finished && userWords.length === 0 && carriesToolResults(messages)) {
+			if (session.turn.pending.size > 0 && [...session.turn.pending.values()].every(call => call.reported)) {
+				await this.abortTurn(session);
+				throw new vscode.LanguageModelError("A tool result could not be matched to the pending call. Please retry your request.");
+			}
 			this.log(`Late tool results for ${key}; the turn is still running, so this response continues it.`);
 			this.markSeen(session, fingerprints);
 			this.applyTools(session, tools);
@@ -1175,9 +1179,9 @@ export class GoogleAcpProvider implements vscode.LanguageModelChatProvider<vscod
 	private resolveToolResults(turn: ActiveTurn, messages: readonly vscode.LanguageModelChatRequestMessage[]): boolean {
 		let resolved = 0;
 
-		// Only the messages after the last assistant reply can answer the pending
-		// calls; older results in the history belong to calls that already settled.
-		for (const message of messages.slice(firstMessageAfterReply(messages))) {
+		// A background notification can place an assistant message after the result.
+		// Only a result with the pending call's ID can settle it.
+		for (const message of messages) {
 			if (message.role !== vscode.LanguageModelChatMessageRole.User) {
 				continue;
 			}

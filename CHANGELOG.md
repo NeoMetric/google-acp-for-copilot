@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8 - 2026-10-30
+
+### Fixed
+
+- The result of a tool call now reaches the agent even when the end of a background command, or another background notification, puts a message from the agent after it. Copilot delivers the result and the notification in one request, and the extension only read the messages after the last reply, so the call it answered was left waiting until it timed out. A result now settles the pending call it names wherever it sits in the chat.
+- A request that carries the result of a call the request cannot settle now fails with an error asking you to retry, instead of leaving the turn waiting and returning an empty response. A turn whose only pending calls were already delivered to Copilot has nothing left to answer the agent with.
+
 ## 0.1.7 - 2026-10-29
 
 ### Changed

@@ -249,6 +249,37 @@ describe('GoogleAcpProvider tool calls', () => {
 		return { progress, response };
 	};
 
+	it('delivers a pending result before a background notification', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+		const first = request(history, token.token);
+		const result = callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		const [call] = toolCallsOf(first.progress);
+		history.push(assistant('working'), user(toolResult(call.callId)), user('<system_notification>Background command completed.</system_notification>'), assistant('reading background result'), user(toolResult('background-read')));
+		const second = request(history, token.token);
+		const delivered = await Promise.race([result.then(() => true), delay(100).then(() => false)]);
+		agent.finishTurn();
+		await second.response;
+		expect(delivered).toBe(true);
+	});
+
+	it('reports an unmatched result instead of returning an empty response', async () => {
+		const token = new CancellationTokenSource();
+		const history = [user('system'), user('hello')];
+		const first = request(history, token.token);
+		const result = callTool('read_file', { path: 'a.txt' });
+		await waitFor(() => toolCallsOf(first.progress).length === 1);
+		await first.response;
+		history.push(assistant('working'), user(toolResult('unrelated-call')));
+		const second = request(history, token.token);
+		const outcome = await second.response.then(() => 'completed', () => 'error');
+		token.cancel();
+		await result;
+		expect(outcome).toBe('error');
+	});
+
 	it('holds a tool call that arrives after its response returned for the next one', async () => {
 		const token = new CancellationTokenSource();
 		const history = [user('system'), user('hello')];
